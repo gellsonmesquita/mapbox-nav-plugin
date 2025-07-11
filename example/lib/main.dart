@@ -146,7 +146,7 @@ class _NavigationScreenState extends State<NavigationScreen> {
                 color: Colors.grey[200],
                 child: MapboxNavigationView(
                   onMapboxViewCreated: _onMapboxViewCreated, // Passe o callback
-                  accessToken: 'pk.eyJ1IjoicmVmcmlhbmdvIiwiYSI6ImNsejlsajczMjBhdHoyanBqZTc4dDU2aWwifQ.ovcPssyrDzf3Fp9w-XllEA',
+                  accessToken: '',
                 ),
               ),
             ),
