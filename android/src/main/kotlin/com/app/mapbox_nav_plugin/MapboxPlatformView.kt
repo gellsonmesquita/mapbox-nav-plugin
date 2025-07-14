@@ -1,7 +1,9 @@
 package com.app.mapbox_nav_plugin
 
+import android.Manifest
 import android.annotation.SuppressLint
 import android.content.Context
+import android.content.pm.PackageManager
 import android.location.Location
 import android.os.Bundle
 import android.util.Log
@@ -9,6 +11,7 @@ import android.view.LayoutInflater
 import android.view.View
 import android.widget.FrameLayout
 import androidx.core.app.ComponentActivity
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.DefaultLifecycleObserver
 import com.mapbox.api.directions.v5.models.DirectionsRoute
 import com.mapbox.api.directions.v5.models.RouteOptions
@@ -52,12 +55,15 @@ import androidx.lifecycle.LifecycleRegistry
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.setViewTreeLifecycleOwner
+import com.mapbox.api.directions.v5.DirectionsCriteria
 import com.mapbox.common.MapboxOptions
 import com.mapbox.maps.MapInitOptions
 import com.mapbox.maps.MapsResourceOptions
+import com.mapbox.maps.extension.style.expressions.dsl.generated.zoom
+import com.mapbox.navigation.core.mapmatching.MapMatchingOptions
 import io.flutter.embedding.android.FlutterActivity
 
-@OptIn(ExperimentalPreviewMapboxNavigationAPI::class)
+
 class MapboxPlatformView(
     private val context: Context,
     private val messenger: BinaryMessenger,
@@ -69,7 +75,7 @@ class MapboxPlatformView(
 
     private val TAG = "MapboxPlatformView"
 
-    private lateinit var eventChannel: EventChannel
+    private var eventChannel: EventChannel
     private var eventSink: EventSink? = null
 
     private lateinit var containerView: View
@@ -78,7 +84,7 @@ class MapboxPlatformView(
 
     private var mapboxNavigation: MapboxNavigation? = null
     private lateinit var viewportDataSource: MapboxNavigationViewportDataSource
-    private lateinit var navigationCamera: NavigationCamera
+    private var navigationCamera: NavigationCamera? = null
     private lateinit var routeLineApi: MapboxRouteLineApi
     private lateinit var routeLineView: MapboxRouteLineView
     private lateinit var replayProgressObserver: ReplayProgressObserver
@@ -94,14 +100,12 @@ class MapboxPlatformView(
             val primaryRoute = routeUpdateResult.navigationRoutes.first()
             currentDirectionsRoute = primaryRoute.directionsRoute // Atualiza a rota atual
             Log.d(TAG, "Rota atualizada. Distância da rota: ${primaryRoute.directionsRoute.distance()}")
-
             routeLineApi.setNavigationRoutes(routeUpdateResult.navigationRoutes) { value ->
                 _mapView?.mapboxMap?.style?.apply { routeLineView.renderRouteDrawData(this, value) }
             }
-
             viewportDataSource.onRouteChanged(primaryRoute) // Usa NavigationRoute
             viewportDataSource.evaluate()
-            navigationCamera.requestNavigationCameraToOverview()
+            navigationCamera?.requestNavigationCameraToOverview()
             sendEvent("routeCreated", mapOf(
                 "routeId" to primaryRoute.directionsRoute.hashCode().toString(),
                 "routeCount" to routeUpdateResult.navigationRoutes.size
@@ -131,44 +135,50 @@ class MapboxPlatformView(
 
             viewportDataSource.onLocationChanged(enhancedLocation)
             viewportDataSource.evaluate()
-            navigationCamera.requestNavigationCameraToFollowing()
+            navigationCamera?.requestNavigationCameraToFollowing()
+
         }
 
         override fun onNewRawLocation(rawLocation: com.mapbox.common.location.Location) {
-            TODO("Not yet implemented")
+
         }
     }
 
-    private var activityLifecycleObserver: DefaultLifecycleObserver? = null // Renomeado para evitar conflito
+    private var activityLifecycleObserver: DefaultLifecycleObserver? = null
 
     init {
         eventChannel = EventChannel(messenger, "$eventChannelBaseName/$viewId")
         eventChannel.setStreamHandler(this)
-        val currentActivity = activityPluginBinding?.activity
-        // Instancie o MapView
+//        if (ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED &&
+//            ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_COARSE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+//            Log.e(TAG, "Permissões de localização não concedidas. Não é possível iniciar a navegação ou mostrar a localização.")
+//            sendEvent("error", mapOf("message" to "Permissões de localização não concedidas. Por favor, conceda as permissões e reinicie o aplicativo."))
+//            initMapView()
+//        }
+        initMapView()
+
+    }
+
+    private fun initMapView() {
         _mapView = MapView(context)
-        // Crie o FrameLayout que será a view raiz do PlatformView
         containerView = FrameLayout(context).apply {
             layoutParams = FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT
             )
-            // Adicione o MapView ao FrameLayout
             addView(_mapView)
         }
 
-         //Configuração inicial do MapView
+        //Configuração inicial do MapView
         _mapView?.mapboxMap?.loadStyle(com.mapbox.maps.Style.MAPBOX_STREETS) { style ->
             _mapView?.mapboxMap?.setCamera(
                 CameraOptions.Builder()
-                    .center(Point.fromLngLat(-0.1278, 51.5074))
-                    .zoom(12.0)
+                    .zoom(20.0)
                     .build()
             )
-
             _mapView?.location?.apply {
                 setLocationProvider(navigationLocationProvider)
-                locationPuck = createDefault2DPuck()
+                locationPuck = createDefault2DPuck(true)
                 enabled = true
             }
             _mapView?.gestures?.addOnMapClickListener { point ->
@@ -176,6 +186,7 @@ class MapboxPlatformView(
                 sendEvent("mapClicked", mapOf("latitude" to point.latitude(), "longitude" to point.longitude()))
                 true
             }
+            navigationCamera?.requestNavigationCameraToOverview()
             sendEvent("pluginInitialized", mapOf("viewId" to viewId))
 
             initializeNavigationComponents()
@@ -183,7 +194,6 @@ class MapboxPlatformView(
             Log.e(TAG, "MapView não foi inicializado corretamente ou falhou ao carregar o estilo.")
             sendEvent("error", mapOf("message" to "MapView failed to initialize or load style."))
         }
-
     }
 
     override fun onFlutterViewAttached(flutterView: View) {
@@ -195,9 +205,6 @@ class MapboxPlatformView(
         }
         lifecycleHelper = LifecycleHelper(lifecycleProvider, shouldDestroyOnDestroy)
         mapView?.setViewTreeLifecycleOwner(lifecycleHelper)
-        MapboxNavigationApp.setup(NavigationOptions.Builder(context).build())
-        MapboxNavigationApp.attach(lifecycleHelper!!)
-        mapboxNavigation = MapboxNavigationApp.current()
     }
 
     override fun onFlutterViewDetached() {
@@ -207,9 +214,11 @@ class MapboxPlatformView(
         mapView?.setViewTreeLifecycleOwner(null)
     }
 
-
     private fun initializeNavigationComponents() {
-        // Inicializa ViewportDataSource e NavigationCamera
+
+        MapboxNavigationApp.setup(NavigationOptions.Builder(context).build())
+        MapboxNavigationApp.attach(lifecycleHelper!!)
+        mapboxNavigation = MapboxNavigationApp.current()
         viewportDataSource = MapboxNavigationViewportDataSource(_mapView!!.mapboxMap)
         val pixelDensity = context.resources.displayMetrics.density
         viewportDataSource.followingPadding = EdgeInsets(
@@ -219,39 +228,59 @@ class MapboxPlatformView(
             40.0 * pixelDensity
         )
         navigationCamera = NavigationCamera(_mapView!!.mapboxMap, _mapView!!.camera, viewportDataSource)
-
-        // Inicializa RouteLineApi e View
+        //replayProgressObserver = ReplayProgressObserver(mapboxNavigation!!.mapboxReplayer)
         routeLineApi = MapboxRouteLineApi(MapboxRouteLineApiOptions.Builder().build())
         routeLineView = MapboxRouteLineView(MapboxRouteLineViewOptions.Builder(context).build())
-
         // Registra observadores
         mapboxNavigation?.registerRoutesObserver(routesObserver)
         mapboxNavigation?.registerLocationObserver(locationObserver)
+        //mapboxNavigation?.registerRouteProgressObserver(replayProgressObserver)
 
-        // Para simulação de rota (opcional, igual ao exemplo MainActivity)
-        replayProgressObserver = ReplayProgressObserver(mapboxNavigation!!.mapboxReplayer)
-        mapboxNavigation?.registerRouteProgressObserver(replayProgressObserver)
+        mapboxNavigation?.startTripSession()
+
+
+
 
         Log.d(TAG, "Componentes de navegação inicializados.")
     }
 
+    private fun isValidCoordinate(value: Double, isLatitude: Boolean): Boolean {
+        return if (isLatitude) value in -90.0..90.0 else value in -180.0..180.0
+    }
+
     @SuppressLint("MissingPermission")
     fun createRoute(origin: List<Double>, destination: List<Double>, waypoints: List<List<Double>>?) {
-        if (mapboxNavigation == null) {
-            Log.e(TAG, "MapboxNavigation não está inicializado para criar rota.")
-            sendEvent("error", mapOf("message" to "MapboxNavigation not initialized for route creation."))
+
+        if (origin == null || destination == null || origin.size != 2 || destination.size != 2) {
+            Log.e(TAG, "Coordenadas de origem ou destino inválidas: origin=$origin, destination=$destination")
+            sendEvent("error", mapOf("message" to "Coordenadas de origem ou destino inválidas. Devem conter exatamente [latitude, longitude]."))
             return
         }
 
-        val originPoint = Point.fromLngLat(origin[1], origin[0])
-        val destinationPoint = Point.fromLngLat(destination[1], destination[0])
+        val originLat = origin[0]
+        val originLng = origin[1]
+        val destLat = destination[0]
+        val destLng = destination[1]
+
+        if (!isValidCoordinate(originLat, true) || !isValidCoordinate(originLng, false) ||
+            !isValidCoordinate(destLat, true) || !isValidCoordinate(destLng, false)) {
+            Log.e(TAG, "Coordenadas fora do intervalo válido: origin=[$originLat, $originLng], destination=[$destLat, $destLng]")
+            sendEvent("error", mapOf("message" to "Coordenadas fora do intervalo válido. Latitude: -90 a 90, Longitude: -180 a 180."))
+            return
+        }
+
+        val originPoint = Point.fromLngLat(originLng, originLat)
+        val destinationPoint = Point.fromLngLat(destLng, destLat)
 
         val routeOptionsBuilder = RouteOptions.builder()
             .applyDefaultNavigationOptions()
             .steps(true)
-            .language("pt-BR")
+            .voiceInstructions(true)
+            .alternatives(true)
+            .language("pt")
             .coordinatesList(listOf(originPoint, destinationPoint))
-            .profile("mapbox/driving-traffic")
+            .profile(DirectionsCriteria.PROFILE_DRIVING_TRAFFIC)
+
 
         mapboxNavigation?.requestRoutes(
             routeOptionsBuilder.build(),
@@ -272,7 +301,7 @@ class MapboxPlatformView(
                         mapboxNavigation?.setNavigationRoutes(routes) // Define a rota no MapboxNavigation
                         // A atualização da UI (linhas da rota, câmera) é feita via routesObserver
                         // A simulação pode ser iniciada aqui ou em startNavigation
-                        currentDirectionsRoute = routes.first().directionsRoute // Armazena para uso posterior
+                        //currentDirectionsRoute = routes.first().directionsRoute // Armazena para uso posterior
                     } else {
                         Log.d(TAG, "Nenhuma rota encontrada.")
                         sendEvent("routeCreated", mapOf("routeCount" to 0))
@@ -305,9 +334,9 @@ class MapboxPlatformView(
         // Inicia simulação de movimento do usuário se uma rota foi carregada
         currentDirectionsRoute?.let { route ->
             val replayData = replayRouteMapper.mapDirectionsRouteGeometry(route)
-            mapboxNavigation?.mapboxReplayer?.pushEvents(replayData)
-            mapboxNavigation?.mapboxReplayer?.seekTo(replayData[0])
-            mapboxNavigation?.mapboxReplayer?.play()
+//            mapboxNavigation?.mapboxReplayer?.pushEvents(replayData)
+//            mapboxNavigation?.mapboxReplayer?.seekTo(replayData[0])
+//            mapboxNavigation?.mapboxReplayer?.play()
             Log.d(TAG, "Simulação de rota iniciada.")
         } ?: Log.w(TAG, "Não há rota para iniciar a simulação.")
     }
@@ -340,8 +369,8 @@ class MapboxPlatformView(
             routeLineView.cancel()
         }
         currentDirectionsRoute = null
-        mapboxNavigation?.mapboxReplayer?.clearEvents() // Limpa eventos de simulação
-        mapboxNavigation?.mapboxReplayer?.stop() // Para o replayer
+//        mapboxNavigation?.mapboxReplayer?.clearEvents() // Limpa eventos de simulação
+//        mapboxNavigation?.mapboxReplayer?.stop() // Para o replayer
         sendEvent("navigationCancelled", null)
         Log.d(TAG, "Navegação cancelada.")
     }
@@ -404,8 +433,6 @@ class MapboxPlatformView(
             routeLineApi.cancel()
         }
         _mapView?.gestures?.removeOnMapClickListener { true }
-        mapboxNavigation?.mapboxReplayer?.clearEvents()
-        mapboxNavigation?.mapboxReplayer?.stop()
         mapboxNavigation = null
         _mapView?.onDestroy()
         _mapView = null

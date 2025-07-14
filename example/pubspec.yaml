@@ -16,7 +16,7 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
-
+  permission_handler: ^12.0.1
   mapbox_nav_plugin:
     # When depending on this package from a real application you should use:
     #   mapbox_nav_plugin: ^x.y.z

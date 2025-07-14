@@ -42,11 +42,6 @@ class MapboxNavPlugin : FlutterPlugin, ActivityAware {
       val viewId = call.argument<Int>("viewId")
       val targetView = if (viewId != null) MapboxViewManager.getView(viewId) else null
       when (call.method) {
-//        "setAccessToken" -> {
-//          mapboxAccessToken = call.argument<String>("accessToken")
-//          Log.d("MapboxNavPlugin", "Mapbox Access Token definido.")
-//          result.success(true)
-//        }
         "createRoute" -> {
           if (targetView != null) {
             val origin = call.argument<List<Double>>("origin")!!

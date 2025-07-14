@@ -77,6 +77,7 @@ android {
         implementation "com.mapbox.navigationcore:android:3.10.0"
         implementation "androidx.annotation:annotation:1.5.0"
         implementation "androidx.lifecycle:lifecycle-runtime-ktx:2.6.2"
+        implementation("com.google.android.gms:play-services-location:21.0.1")
     }
 
     testOptions {
