@@ -89,14 +89,11 @@ android {
     dependencies {
         testImplementation("org.jetbrains.kotlin:kotlin-test")
         testImplementation("org.mockito:mockito-core:5.0.0")
-        //implementation "com.mapbox.navigationcore:android:3.10.0"
         implementation "com.mapbox.navigationcore:android-ndk27:3.17.1"
         implementation "com.mapbox.navigationcore:android-auto-components-ndk27:3.17.1"
         implementation "androidx.annotation:annotation:1.5.0"
         implementation "androidx.lifecycle:lifecycle-runtime-ktx:2.6.2"
         implementation("com.google.android.gms:play-services-location:21.0.1")
-        //implementation "com.mapbox.navigationcore:android:3.10.0"
-
     }
 
     testOptions {

@@ -1,28 +1,27 @@
-package com.plugin.mapboxnav
+package com.plugin.mapboxnav.infrastructure.registry
 
-
-import android.util.Log
+import com.plugin.mapboxnav.core.utils.Logger
+import com.plugin.mapboxnav.presentation.views.MapboxPlatformView
 import java.util.concurrent.ConcurrentHashMap
 
 object MapboxViewManager {
 
-    private const val TAG = "MapboxViewManager"
     private val views: ConcurrentHashMap<Int, MapboxPlatformView> = ConcurrentHashMap()
 
     fun registerView(viewId: Int, view: MapboxPlatformView) {
         views[viewId] = view
-        Log.d(TAG, "View com ID $viewId registrada. Total de views: ${views.size}")
+        Logger.d("View registered with ID $viewId. Total views: ${views.size}")
     }
 
     fun unregisterView(viewId: Int) {
         views.remove(viewId)
-        Log.d(TAG, "View com ID $viewId desregistrada. Total de views: ${views.size}")
+        Logger.d("View unregistered with ID $viewId. Total views: ${views.size}")
     }
 
     fun getView(viewId: Int): MapboxPlatformView? {
         val view = views[viewId]
         if (view == null) {
-            Log.w(TAG, "Nenhuma MapboxPlatformView encontrada para o ID: $viewId")
+            Logger.w("No MapboxPlatformView found for ID: $viewId")
         }
         return view
     }
@@ -32,7 +31,12 @@ object MapboxViewManager {
     }
 
     fun clearAllViews() {
+        views.values.forEach { it.dispose() }
         views.clear()
-        Log.d(TAG, "Todas as views foram limpas.")
+        Logger.d("All views cleared")
+    }
+
+    fun getViewCount(): Int {
+        return views.size
     }
 }

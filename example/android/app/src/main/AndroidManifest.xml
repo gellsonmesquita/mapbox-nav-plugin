@@ -1,4 +1,7 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
     <application
         android:label="mapboxnav_example"
         android:name="${applicationName}"
@@ -27,7 +30,7 @@
 
         <!-- CarAppService for navigation -->
         <service
-            android:name=".car.MainCarAppService"
+            android:name=".platform.auto.MainCarAppService"
             android:exported="true"
             android:label="@string/app_name"
             android:icon="@mipmap/ic_launcher"

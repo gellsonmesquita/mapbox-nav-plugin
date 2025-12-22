@@ -1,134 +1,141 @@
-package com.plugin.mapboxnav.car
+package com.plugin.mapboxnav.platform.auto
 
 
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
-import androidx.annotation.RequiresApi
 import androidx.annotation.RequiresPermission
 import androidx.car.app.Screen
 import androidx.car.app.Session
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
+import com.mapbox.maps.ContextMode
 import com.mapbox.maps.MapInitOptions
+import com.mapbox.maps.MapOptions
 import com.mapbox.maps.extension.androidauto.MapboxCarMap
-import com.mapbox.navigation.ui.androidauto.map.MapboxCarMapLoader
+import com.mapbox.navigation.base.ExperimentalPreviewMapboxNavigationAPI
 import com.mapbox.navigation.base.options.NavigationOptions
+import com.mapbox.navigation.core.MapboxNavigation
 import com.mapbox.navigation.core.lifecycle.MapboxNavigationApp
+import com.mapbox.navigation.core.lifecycle.MapboxNavigationObserver
 import com.mapbox.navigation.ui.androidauto.MapboxCarContext
 import com.mapbox.navigation.ui.androidauto.deeplink.GeoDeeplinkNavigateAction
+import com.mapbox.navigation.ui.androidauto.map.MapboxCarMapLoader
 import com.mapbox.navigation.ui.androidauto.screenmanager.MapboxScreen
 import com.mapbox.navigation.ui.androidauto.screenmanager.MapboxScreenManager
 import com.mapbox.navigation.ui.androidauto.screenmanager.prepareScreens
-import com.mapbox.navigation.core.lifecycle.MapboxNavigationObserver
-import com.mapbox.navigation.core.MapboxNavigation
-
+import com.plugin.mapboxnav.core.utils.Logger
 
 class MainCarSession : Session() {
 
-    // MapboxCarMapLoader handles loading and rendering of the map in Android Auto
     private val carMapLoader = MapboxCarMapLoader()
 
-    // MapboxCarMap provides the map surface for Android Auto
     private val mapboxCarMap = MapboxCarMap().registerObserver(carMapLoader)
 
-    // MapboxCarContext integrates Mapbox Navigation with Android Auto lifecycle
     private val mapboxCarContext = MapboxCarContext(lifecycle, mapboxCarMap)
 
-    // Navigation observer handles starting/stopping trip sessions when attached/detached
+    private lateinit var carNavigationBridge: CarNavigationBridge
+
     private val navigationObserver = object : MapboxNavigationObserver {
         @RequiresPermission(allOf = [Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION])
         override fun onAttached(mapboxNavigation: MapboxNavigation) {
-            // Start the trip session to begin receiving location updates
-            mapboxNavigation.startTripSession()
+            if (hasLocationPermission()) {
+                mapboxNavigation.startTripSession()
+                Logger.d("Trip session started in car")
+            } else {
+                Logger.w("Location permission not granted, cannot start trip session")
+            }
         }
 
         override fun onDetached(mapboxNavigation: MapboxNavigation) {
-            // Stop the trip session when detached to save battery
             mapboxNavigation.stopTripSession()
+            Logger.d("Trip session stopped in car")
         }
     }
 
     init {
-        // Prepare the screen navigation graph for Android Auto
+        carNavigationBridge = CarNavigationBridge.getInstance(carContext)
+
         mapboxCarContext.prepareScreens()
 
         lifecycle.addObserver(object : DefaultLifecycleObserver {
             override fun onCreate(owner: LifecycleOwner) {
-                // Initialize MapboxNavigationApp if not already setup
+                Logger.d("Car session onCreate")
+
                 if (!MapboxNavigationApp.isSetup()) {
                     MapboxNavigationApp.setup(
                         NavigationOptions.Builder(carContext)
                             .build()
                     )
+                    Logger.d("MapboxNavigationApp initialized in car")
                 }
 
-                // Attach the car lifecycle to MapboxNavigationApp
-                // This ensures navigation state is managed with the car session
+                carNavigationBridge.initialize(owner)
+                carNavigationBridge.onCarSessionStarted()
+
                 MapboxNavigationApp.attach(owner)
 
-                // Register the navigation observer to handle trip session lifecycle
                 MapboxNavigationApp.registerObserver(navigationObserver)
 
-                // Setup the MapboxCarMap with SHARED context mode
-                // SHARED context is required when using Android Auto widgets
                 mapboxCarMap.setup(
                     carContext,
                     MapInitOptions(
                         context = carContext,
-                        mapOptions = com.mapbox.maps.MapOptions.Builder()
-                            .contextMode(com.mapbox.maps.ContextMode.SHARED)
+                        mapOptions = MapOptions.Builder()
+                            .contextMode(ContextMode.SHARED)
                             .build()
                     )
                 )
+
+                Logger.d("Car map setup completed")
             }
 
             override fun onDestroy(owner: LifecycleOwner) {
-                // Clean up: unregister observer and detach from navigation
+                Logger.d("Car session onDestroy")
+
                 MapboxNavigationApp.unregisterObserver(navigationObserver)
                 MapboxNavigationApp.detach(owner)
                 mapboxCarMap.clearObservers()
+
+                carNavigationBridge.onCarSessionEnded()
+
+                Logger.d("Car session cleaned up")
             }
         })
     }
 
-    /**
-     * Create the initial screen based on location permission status.
-     * Returns either the FREE_DRIVE screen or a permission request screen.
-     */
-    @RequiresApi(Build.VERSION_CODES.M)
+
     override fun onCreateScreen(intent: Intent): Screen {
-        // Check if location permission is granted
+        Logger.d("Creating car screen")
+
         val firstScreenKey = if (isLocationPermissionGranted()) {
-            // If permission granted, show the Free Drive navigation screen
             MapboxScreenManager.current()?.key ?: MapboxScreen.FREE_DRIVE
         } else {
-            // If permission not granted, show permission request screen
             MapboxScreen.NEEDS_LOCATION_PERMISSION
         }
 
-        // Create and return the screen using MapboxScreenManager
         return mapboxCarContext.mapboxScreenManager.createScreen(firstScreenKey)
     }
 
-    /**
-     * Handle new intents, including geo deeplinks for navigation.
-     * This enables voice-activated navigation ("Navigate to...")
-     */
-    @OptIn(com.mapbox.navigation.base.ExperimentalPreviewMapboxNavigationAPI::class)
+    @OptIn(ExperimentalPreviewMapboxNavigationAPI::class)
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
-        // Handle geo deeplinks (e.g., geo:latitude,longitude)
+        Logger.d("Car session received new intent: ${intent.action}")
+
         GeoDeeplinkNavigateAction(mapboxCarContext).onNewIntent(intent)
     }
 
-    /**
-     * Helper function to check if location permission is granted.
-     */
-    @RequiresApi(Build.VERSION_CODES.M)
     private fun isLocationPermissionGranted(): Boolean {
-        return carContext.checkSelfPermission(android.Manifest.permission.ACCESS_FINE_LOCATION) ==
+        return carContext.checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) ==
                 PackageManager.PERMISSION_GRANTED
+    }
+
+    private fun hasLocationPermission(): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            isLocationPermissionGranted()
+        } else {
+            true // Permissions granted at install time on older versions
+        }
     }
 }

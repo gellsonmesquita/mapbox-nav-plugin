@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:mapboxnav/mapboxnav.dart';
 import 'dart:async';
 
-import 'package:permission_handler/permission_handler.dart'; //
+import 'package:permission_handler/permission_handler.dart';
 
 void main() {
   runApp(const MyApp());
@@ -46,18 +46,14 @@ class _NavigationScreenState extends State<NavigationScreen> {
   @override
   void initState() {
     super.initState();
-    // O controller não é mais inicializado aqui.
-    // Ele será inicializado no callback _onMapboxViewCreated.
     _checkAndRequestLocationPermissions();
 
   }
   Future<void> _checkAndRequestLocationPermissions() async {
-    // 1. Verificar o status atual das permissões de localização
-    var status = await Permission.locationWhenInUse.status; // ou .location se precisar de background
+    var status = await Permission.locationWhenInUse.status;
     print('Permissão de localização status inicial: $status');
 
     if (status.isDenied || status.isPermanentlyDenied) {
-      // 2. Solicitar permissão se não foi concedida ou foi negada
       status = await Permission.locationWhenInUse.request();
       print('Permissão de localização status após solicitação: $status');
     }
@@ -72,33 +68,23 @@ class _NavigationScreenState extends State<NavigationScreen> {
         _permissionsGranted = false;
       });
       print('Permissão de localização negada ou permanentemente negada.');
-      // Opcional: Mostrar uma dialog explicando por que a permissão é necessária
-      // e direcionar o usuário para as configurações do aplicativo se status.isPermanentlyDenied
     }
   }
 
 
   @override
   void dispose() {
-    _eventSubscription?.cancel(); // Cancelar a subscrição de eventos
-    _controller?.dispose(); // Descartar o controller se ele foi criado
+    _eventSubscription?.cancel();
+    _controller?.dispose();
     super.dispose();
   }
 
-  // Este callback é chamado pelo MapboxNavigationView quando a view nativa é criada
   void _onMapboxViewCreated(MapboxNavigationController controller) {
     setState(() {
-      _controller = controller; // Atribui o controller recém-criado
+      _controller = controller;
       _navigationStatus = 'MapboxNavigationView inicializado.';
     });
-
-    // Inicia a escuta por eventos APENAS DEPOIS que o controller é criado
-    _eventSubscription = _controller!.events.listen(_handleNavigationEvent); //
-
-    // Defina o token de acesso aqui ou no construtor da view se você preferir.
-    // Se o token for passado no construtor do MapboxNavigationView,
-    // ele já será definido internamente na view antes de chamar este callback.
-    // _controller!.setAccessToken('YOUR_MAPBOX_PUBLIC_ACCESS_TOKEN');
+    _eventSubscription = _controller!.events.listen(_handleNavigationEvent);
   }
 
   void _handleNavigationEvent(MapboxNavigationEvent event) {
