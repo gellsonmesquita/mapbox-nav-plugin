@@ -1,6 +1,7 @@
 package com.plugin.mapboxnav.presentation.views
 
 import android.Manifest
+import android.R
 import android.annotation.SuppressLint
 import android.content.Context
 import android.content.res.Configuration
@@ -427,7 +428,7 @@ class MapboxPlatformView(
     }
 
     @SuppressLint("MissingPermission")
-    fun createRoute(origin: List<Double>?, destination: List<Double>?, waypoints: List<List<Double>>?) {
+    fun createRoute(origin: List<Double>?, destination: List<Double>?, waypoints: List<List<Double>>?, isToChange: Boolean = false) {
         if (mapboxNavigation == null) {
             Log.e(TAG, "MapboxNavigation não está inicializado.")
             sendEvent("error", mapOf("message" to "MapboxNavigation não está inicializado."))
@@ -483,6 +484,9 @@ class MapboxPlatformView(
                         mapboxNavigation?.setNavigationRoutes(emptyList())
                         mapboxNavigation?.setNavigationRoutes(routes)
                         navigationCamera?.requestNavigationCameraToOverview()
+                        if (isToChange) {
+                            setRouteAndStartNavigation()
+                        }
                         sendEvent("routeCreated", mapOf(
                             "routeId" to routes.first().directionsRoute.hashCode().toString(),
                             "routeCount" to routes.size,
@@ -549,9 +553,7 @@ class MapboxPlatformView(
         if (currentLocation != null) {
             val originPoint = Point.fromLngLat(currentLocation.longitude, currentLocation.latitude)
             cancelNavigation()
-            createRoute(listOf(originPoint.latitude(), originPoint.longitude()), newDestination, null)
-            navigationCamera?.requestNavigationCameraToFollowing()
-            //setRouteAndStartNavigation()
+            createRoute(listOf(originPoint.latitude(), originPoint.longitude()), newDestination, null, true)
             sendEvent("destinationChanged", mapOf("newDestinationLat" to newDestLat, "newDestinationLng" to newDestLng))
             Log.d(TAG, "Destino alterado, recalculando rota.")
         } else {
