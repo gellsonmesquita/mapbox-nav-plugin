@@ -2,7 +2,7 @@ package com.plugin.mapboxnav.domain.models
 
 
 data class NavigationConfig(
-    val language: String = "en",
+    val language: String = "pt-pt",
     val voiceUnits: VoiceUnits = VoiceUnits.IMPERIAL,
     val showManeuvers: Boolean = true,
     val showSpeedLimit: Boolean = true,

@@ -4,8 +4,8 @@ import android.content.Context
 import com.mapbox.navigation.base.options.NavigationOptions
 import com.mapbox.navigation.core.MapboxNavigation
 import com.mapbox.navigation.core.lifecycle.MapboxNavigationApp
-import com.plugin.mapboxnav.core.utils.Logger
 import com.plugin.mapboxnav.domain.models.NavigationConfig
+import com.plugin.mapboxnav.domain.utils.Logger
 
 class MapboxNavigationManager(private val context: Context) {
 
@@ -25,7 +25,10 @@ class MapboxNavigationManager(private val context: Context) {
         mapboxNavigation = MapboxNavigationApp.current()
     }
 
-    fun getNavigation(): MapboxNavigation? = mapboxNavigation
+    fun getNavigation(): MapboxNavigation? {
+        initialize()
+        return mapboxNavigation
+    }
 
     fun getCurrentConfig(): NavigationConfig = currentConfig
 

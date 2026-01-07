@@ -1,13 +1,18 @@
 package com.plugin.mapboxnav.infrastructure.channels
 
+import android.Manifest
+import android.os.Build
+import androidx.annotation.RequiresApi
+import androidx.annotation.RequiresPermission
 import com.plugin.mapboxnav.infrastructure.registry.MapboxViewManager
 import com.plugin.mapboxnav.presentation.views.MapboxPlatformView
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 
-
+@RequiresApi(Build.VERSION_CODES.BAKLAVA)
 class MethodChannelHandler : MethodChannel.MethodCallHandler {
 
+    @RequiresPermission(allOf = [Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION])
     override fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {
         val viewId = call.argument<Int>("viewId")
         val targetView = viewId?.let { MapboxViewManager.getView(it) }
@@ -19,6 +24,7 @@ class MethodChannelHandler : MethodChannel.MethodCallHandler {
 
             "createRoute" -> {
                 handleCreateRoute(call, result, targetView)
+
             }
 
             "startNavigation" -> {
@@ -47,6 +53,7 @@ class MethodChannelHandler : MethodChannel.MethodCallHandler {
         }
     }
 
+
     private fun handleCreateRoute(
         call: MethodCall,
         result: MethodChannel.Result,
@@ -70,6 +77,7 @@ class MethodChannelHandler : MethodChannel.MethodCallHandler {
         result.success(true)
     }
 
+    @RequiresPermission(allOf = [Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION])
     private fun handleStartNavigation(
         call: MethodCall,
         result: MethodChannel.Result,
@@ -93,6 +101,7 @@ class MethodChannelHandler : MethodChannel.MethodCallHandler {
         result.success(true)
     }
 
+    @RequiresPermission(allOf = [Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION])
     private fun handleChangeDestination(
         call: MethodCall,
         result: MethodChannel.Result,

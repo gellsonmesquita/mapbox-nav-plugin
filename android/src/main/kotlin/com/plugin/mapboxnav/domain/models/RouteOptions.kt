@@ -11,3 +11,7 @@ data class RouteOptions(
     val exclude: List<String>? = null
 )
 
+data class Point(
+    val latitude: Double,
+    val longitude: Double
+)

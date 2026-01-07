@@ -1,6 +1,5 @@
 package com.plugin.mapboxnav.data.managers
 
-import com.plugin.mapboxnav.core.utils.Logger
 import android.content.Context
 import com.mapbox.api.directions.v5.models.RouteOptions as MapboxRouteOptions
 import com.mapbox.geojson.Point
@@ -10,6 +9,7 @@ import com.mapbox.navigation.base.route.NavigationRouterCallback
 import com.mapbox.navigation.base.route.RouterFailure
 import com.mapbox.navigation.core.MapboxNavigation
 import com.plugin.mapboxnav.domain.models.RouteOptions
+import com.plugin.mapboxnav.domain.utils.Logger
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlin.coroutines.resume
 

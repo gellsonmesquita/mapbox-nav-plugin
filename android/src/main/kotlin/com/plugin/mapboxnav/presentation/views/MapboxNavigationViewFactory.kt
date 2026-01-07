@@ -2,6 +2,8 @@ package com.plugin.mapboxnav.presentation.views
 
 
 import android.content.Context
+import android.os.Build
+import androidx.annotation.RequiresApi
 import androidx.lifecycle.Lifecycle
 import com.mapbox.common.MapboxOptions
 import com.plugin.mapboxnav.core.config.MapboxConfig
@@ -11,23 +13,27 @@ import io.flutter.plugin.platform.PlatformView
 import io.flutter.plugin.platform.PlatformViewFactory
 import  com.plugin.mapboxnav.R
 import com.plugin.mapboxnav.infrastructure.registry.MapboxViewManager
+import io.flutter.embedding.engine.plugins.activity.ActivityPluginBinding
 
 
 class MapboxNavigationViewFactory(
     private val messenger: BinaryMessenger,
+    private val currentActivityBinding: ActivityPluginBinding,
     private val lifecycleProvider: Lifecycle
 ) : PlatformViewFactory(StandardMessageCodec.INSTANCE) {
 
+    @RequiresApi(Build.VERSION_CODES.BAKLAVA)
     override fun create(context: Context, viewId: Int, args: Any?): PlatformView {
-        // Set Mapbox access token
-        MapboxOptions.accessToken = context.getString(R.string.mapbox_access_token)
+
+        //MapboxOptions.accessToken = context.getString(R.string.mapbox_access_token)
 
         val mapboxView = MapboxPlatformView(
             context,
             messenger,
             MapboxConfig.EVENT_CHANNEL_BASE_NAME,
             viewId,
-            lifecycleProvider
+            currentActivityBinding,
+            lifecycleProvider,
         )
 
         MapboxViewManager.registerView(viewId, mapboxView)

@@ -1,9 +1,10 @@
 package com.plugin.mapboxnav.presentation.controllers
 
+import android.annotation.SuppressLint
 import android.content.Context
 import androidx.lifecycle.LifecycleOwner
+import com.mapbox.navigation.core.MapboxNavigation
 import com.mapbox.navigation.core.lifecycle.MapboxNavigationApp
-import com.plugin.mapboxnav.core.utils.Logger
 import com.plugin.mapboxnav.data.managers.MapboxNavigationManager
 import com.plugin.mapboxnav.data.managers.RouteManager
 import com.plugin.mapboxnav.data.repository.NavigationRepositoryImpl
@@ -18,6 +19,7 @@ import com.plugin.mapboxnav.domain.usecases.ChangeDestinationUseCase
 import com.plugin.mapboxnav.domain.usecases.CreateRouteUseCase
 import com.plugin.mapboxnav.domain.usecases.StartNavigationUseCase
 import com.plugin.mapboxnav.domain.usecases.UpdateNavigationConfigUseCase
+import com.plugin.mapboxnav.domain.utils.Logger
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -28,24 +30,18 @@ class NavigationController(private val context: Context) {
 
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
 
-    // Managers
     private val navigationManager = MapboxNavigationManager(context)
     private val routeManager = RouteManager(context)
 
-    // Repository
     private val repository = NavigationRepositoryImpl(context, navigationManager, routeManager)
 
-    // Use Cases
     private val createRouteUseCase = CreateRouteUseCase(repository)
     private val startNavigationUseCase = StartNavigationUseCase(repository)
     private val cancelNavigationUseCase = CancelNavigationUseCase(repository)
     private val changeDestinationUseCase = ChangeDestinationUseCase(repository)
     private val updateConfigUseCase = UpdateNavigationConfigUseCase(repository)
 
-    // Current Configuration
     private var currentConfig = NavigationConfig()
-
-    // State Callback
     private var stateCallback: ((NavigationState) -> Unit)? = null
 
     fun initialize(lifecycleOwner: LifecycleOwner, config: NavigationConfig = NavigationConfig()) {
@@ -55,6 +51,11 @@ class NavigationController(private val context: Context) {
         Logger.d("NavigationController initialized")
     }
 
+    fun getNavitigation(): MapboxNavigation? {
+        return navigationManager.getNavigation()
+    }
+
+    @SuppressLint("MissingPermission")
     fun startFreeDrive() {
         scope.launch {
             try {
@@ -112,7 +113,6 @@ class NavigationController(private val context: Context) {
         onResult: (Result<Unit>) -> Unit
     ) {
         scope.launch {
-            // First create the route
             val routeOptions = RouteOptions(
                 origin = origin,
                 destination = destination,
@@ -123,7 +123,6 @@ class NavigationController(private val context: Context) {
 
             routeResult.onSuccess { routes ->
                 if (routes.isNotEmpty()) {
-                    // Then start navigation with the first route
                     val navResult = startNavigationUseCase(routes.first(), currentConfig)
                     onResult(navResult)
                 } else {

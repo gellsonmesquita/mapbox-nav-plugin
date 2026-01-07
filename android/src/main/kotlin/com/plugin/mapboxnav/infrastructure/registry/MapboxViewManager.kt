@@ -1,6 +1,8 @@
 package com.plugin.mapboxnav.infrastructure.registry
 
-import com.plugin.mapboxnav.core.utils.Logger
+import android.os.Build
+import androidx.annotation.RequiresApi
+import com.plugin.mapboxnav.domain.utils.Logger
 import com.plugin.mapboxnav.presentation.views.MapboxPlatformView
 import java.util.concurrent.ConcurrentHashMap
 
@@ -30,6 +32,7 @@ object MapboxViewManager {
         return views.values
     }
 
+    @RequiresApi(Build.VERSION_CODES.BAKLAVA)
     fun clearAllViews() {
         views.values.forEach { it.dispose() }
         views.clear()

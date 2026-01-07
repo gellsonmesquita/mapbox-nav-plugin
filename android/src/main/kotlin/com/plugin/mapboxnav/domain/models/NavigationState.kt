@@ -19,4 +19,3 @@ data class RouteInfo(
     val waypoints: List<Point>? = null
 )
 
-data class Point(val latitude: Double, val longitude: Double)

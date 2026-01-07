@@ -4,11 +4,9 @@ import android.Manifest
 import android.annotation.SuppressLint
 import android.content.Context
 import androidx.annotation.RequiresPermission
-import com.mapbox.navigation.base.internal.utils.RouteParsingManager
 import com.mapbox.navigation.base.route.NavigationRoute
 import com.mapbox.navigation.base.route.NavigationRouterCallback
 import com.mapbox.navigation.base.route.RouterFailure
-import com.plugin.mapboxnav.core.utils.Logger
 import com.plugin.mapboxnav.data.managers.MapboxNavigationManager
 import com.plugin.mapboxnav.data.managers.RouteManager
 import com.plugin.mapboxnav.domain.models.NavigationConfig
@@ -19,6 +17,7 @@ import com.plugin.mapboxnav.domain.repository.NavigationRepository
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import com.plugin.mapboxnav.domain.models.RouteOptions
+import com.plugin.mapboxnav.domain.utils.Logger
 import kotlin.coroutines.resume
 import kotlin.coroutines.suspendCoroutine
 
@@ -38,14 +37,21 @@ class NavigationRepositoryImpl(
 
     override suspend fun createRoute(options: RouteOptions): Result<List<NavigationRoute>> =
         suspendCoroutine { continuation ->
-            val navigation = navigationManager.getNavigation()
+            var navigation = navigationManager.getNavigation()
             if (navigation == null) {
                 continuation.resume(Result.failure(Exception("MapboxNavigation not initialized")))
                 return@suspendCoroutine
             }
-
+            val origin = com.mapbox.geojson.Point.fromLngLat(
+                options.origin.longitude,
+                options.origin.latitude
+            )
+            val destination = com.mapbox.geojson.Point.fromLngLat(
+                options.destination.longitude,
+                options.destination.latitude
+            )
             val mapboxOptions = com.mapbox.api.directions.v5.models.RouteOptions.builder()
-                .coordinatesList(listOf(options.origin, options.destination) as List<com.mapbox.geojson.Point?>)
+                .coordinatesList(listOf(origin,destination))
                 .profile(options.profile.value)
                 .alternatives(options.alternatives)
                 .build()
@@ -63,7 +69,7 @@ class NavigationRepositoryImpl(
                     reasons: List<RouterFailure>,
                     routeOptions: com.mapbox.api.directions.v5.models.RouteOptions
                 ) {
-                    TODO("Not yet implemented")
+
                 }
 
                 override fun onRoutesReady(routes: List<NavigationRoute>, routerOrigin: String) {
