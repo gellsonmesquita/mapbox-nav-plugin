@@ -483,9 +483,10 @@ class MapboxPlatformView(
                     if (routes.isNotEmpty()) {
                         mapboxNavigation?.setNavigationRoutes(emptyList())
                         mapboxNavigation?.setNavigationRoutes(routes)
-                        navigationCamera?.requestNavigationCameraToOverview()
                         if (isToChange) {
                             setRouteAndStartNavigation()
+                        }else {
+                            navigationCamera?.requestNavigationCameraToOverview()
                         }
                         sendEvent("routeCreated", mapOf(
                             "routeId" to routes.first().directionsRoute.hashCode().toString(),
