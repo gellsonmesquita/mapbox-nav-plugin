@@ -452,7 +452,6 @@ class MapboxPlatformView(
             sendEvent("error", mapOf("message" to "Coordenadas fora do intervalo válido. Latitude: -90 a 90, Longitude: -180 a 180."))
             return
         }
-
         val originPoint = Point.fromLngLat(originLocation.longitude, originLocation.latitude)
         val destinationPoint = Point.fromLngLat(destLng, destLat)
 
