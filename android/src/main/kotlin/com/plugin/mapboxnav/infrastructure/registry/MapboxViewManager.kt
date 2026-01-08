@@ -24,8 +24,6 @@ object MapboxViewManager {
         val view = views[viewId]
         if (view == null) {
             Logger.w("No MapboxPlatformView found for ID: $viewId")
-        }else {
-            registerView(viewId, view)
         }
         return view
     }
