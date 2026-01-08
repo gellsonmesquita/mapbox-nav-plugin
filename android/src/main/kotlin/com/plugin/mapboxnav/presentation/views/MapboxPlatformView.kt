@@ -170,7 +170,6 @@ class MapboxPlatformView(
             }
             viewportDataSource.onRouteChanged(primaryRoute)
             viewportDataSource.evaluate()
-            //navigationCamera?.requestNavigationCameraToOverview() /ffff
             sendEvent("routeCreated", mapOf(
                 "routeId" to primaryRoute.directionsRoute.hashCode().toString(),
                 "routeCount" to routeUpdateResult.navigationRoutes.size
@@ -186,7 +185,11 @@ class MapboxPlatformView(
             viewportDataSource.clearRouteData()
             viewportDataSource.evaluate()
             currentDirectionsRoute = null
-            sendEvent("routeCreated", mapOf("routeCount" to 0))
+            sendEvent("routeCreated", mapOf(
+                "routeCount" to 0,
+                "distance" to currentDirectionsRoute?.distance(),
+                "duration" to currentDirectionsRoute?.duration()
+            ))
             Log.d(TAG, "Nenhuma rota encontrada no RouteObserver.")
         }
     }
@@ -424,6 +427,7 @@ class MapboxPlatformView(
 
 
         mapboxNavigation?.startTripSession()
+        sendEvent("mapboxNavigation", mapOf("isInitialized" to true))
         Log.d(TAG, "Componentes de navegação inicializados.")
     }
 
