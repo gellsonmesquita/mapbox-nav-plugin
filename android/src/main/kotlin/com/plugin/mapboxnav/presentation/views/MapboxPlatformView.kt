@@ -25,9 +25,11 @@ import com.mapbox.maps.CameraOptions
 import com.mapbox.maps.EdgeInsets
 import com.mapbox.maps.MapView
 import com.mapbox.maps.plugin.animation.camera
+import com.mapbox.maps.plugin.attribution.attribution
 import com.mapbox.maps.plugin.gestures.gestures
 import com.mapbox.maps.plugin.locationcomponent.createDefault2DPuck
 import com.mapbox.maps.plugin.locationcomponent.location
+import com.mapbox.maps.plugin.logo.logo
 import com.mapbox.navigation.base.ExperimentalPreviewMapboxNavigationAPI
 import com.mapbox.navigation.base.extensions.applyDefaultNavigationOptions
 import com.mapbox.navigation.base.extensions.applyLanguageAndVoiceUnitOptions
@@ -315,6 +317,8 @@ class MapboxPlatformView(
                     .zoom(15.0)
                     .build()
             )
+            _mapView?.logo?.enabled = false
+            _mapView?.attribution?.enabled = false
             _mapView?.location?.apply {
                 setLocationProvider(navigationLocationProvider)
                 locationPuck = createDefault2DPuck(true)
