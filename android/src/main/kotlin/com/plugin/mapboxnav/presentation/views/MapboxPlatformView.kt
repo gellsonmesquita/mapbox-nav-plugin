@@ -432,7 +432,7 @@ class MapboxPlatformView(
     }
 
     @SuppressLint("MissingPermission")
-    fun createRoute(origin: List<Double>?, destination: List<Double>?, waypoints: List<List<Double>>?, isToChange: Boolean = false) {
+    fun createRoute(origin: List<Double>?, destination: List<Double>?, waypoints: List<List<Double>>?) {
         if (mapboxNavigation == null) {
             Log.e(TAG, "MapboxNavigation não está inicializado.")
             sendEvent("error", mapOf("message" to "MapboxNavigation não está inicializado."))
@@ -486,11 +486,7 @@ class MapboxPlatformView(
                     if (routes.isNotEmpty()) {
                         mapboxNavigation?.setNavigationRoutes(emptyList())
                         mapboxNavigation?.setNavigationRoutes(routes)
-                        if (isToChange) {
-                            setRouteAndStartNavigation()
-                        }else {
-                            navigationCamera?.requestNavigationCameraToOverview()
-                        }
+                        navigationCamera?.requestNavigationCameraToOverview()
                         sendEvent("routeCreated", mapOf(
                             "routeId" to routes.first().directionsRoute.hashCode().toString(),
                             "routeCount" to routes.size,
@@ -557,7 +553,11 @@ class MapboxPlatformView(
         if (currentLocation != null) {
             val originPoint = Point.fromLngLat(currentLocation.longitude, currentLocation.latitude)
             cancelNavigation()
-            createRoute(listOf(originPoint.latitude(), originPoint.longitude()), newDestination, null, true)
+            startNavigation(
+                origin = listOf(currentLocation.latitude, currentLocation.longitude),
+                destination = listOf(newDestLat, newDestLng),
+                waypoints = null
+            )
             sendEvent("destinationChanged", mapOf("newDestinationLat" to newDestLat, "newDestinationLng" to newDestLng))
             Log.d(TAG, "Destino alterado, recalculando rota.")
         } else {
@@ -665,8 +665,7 @@ class MapboxPlatformView(
         //tripProgressApi.cancel()
         speechApi.cancel()
         voiceInstructionsPlayer.shutdown()
-        _mapView?.onDestroy()
-        _mapView = null
+        //_mapView = null
         eventChannel.setStreamHandler(null)
         methodChannel.setMethodCallHandler(null)
         activityPluginBinding = null
