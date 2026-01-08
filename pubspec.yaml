@@ -1,5 +1,5 @@
 name: mapboxnav
-description: "A new Flutter project."
+description: "A Flutter plugin that enables developers to integrate **Mapbox Navigation** (Turn-by-Turn) into their applications. This plugin bridges Flutter with Mapbox's powerful native navigation SDKs."
 version: 1.0.0
 homepage: https://github.com/gellsonmesquita/mapbox-nav-plugin
 repository: https://github.com/gellsonmesquita/mapbox-nav-plugin
