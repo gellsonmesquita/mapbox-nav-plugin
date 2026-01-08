@@ -1,7 +1,8 @@
 name: mapboxnav
 description: "A new Flutter project."
 version: 0.0.1
-homepage:
+homepage: https://github.com/gellsonmesquita/mapbox-nav-plugin
+repository: https://github.com/gellsonmesquita/mapbox-nav-plugin
 
 environment:
   sdk: ^3.8.1
