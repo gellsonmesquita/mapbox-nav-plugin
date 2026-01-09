@@ -346,7 +346,7 @@ class MapboxPlatformView(
                 }
                 true
             }
-            navigationCamera?.requestNavigationCameraToOverview()
+            //navigationCamera?.requestNavigationCameraToOverview()
             sendEvent("pluginInitialized", mapOf("viewId" to viewId))
             initializeNavigationComponents()
         } ?: run {
@@ -531,7 +531,7 @@ class MapboxPlatformView(
                         if (isDestinationChange) {
                             setRouteAndStartNavigation()
                         }else {
-                            navigationCamera?.requestNavigationCameraToOverview()
+                            //navigationCamera?.requestNavigationCameraToOverview()
                         }
                         sendEvent("routeCreated", mapOf(
                             "routeId" to routes.first().directionsRoute.hashCode().toString(),
