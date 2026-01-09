@@ -545,6 +545,7 @@ class MapboxPlatformView(
                         ))
                         if (isDestinationChange) {
                             setRouteAndStartNavigation()
+                            navigationCamera?.requestNavigationCameraToFollowing()
                         }
                     } else {
                         Log.d(TAG, "Nenhuma rota encontrada.")
