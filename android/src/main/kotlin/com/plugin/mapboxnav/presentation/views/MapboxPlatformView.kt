@@ -13,6 +13,7 @@ import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.LifecycleRegistry
+import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.setViewTreeLifecycleOwner
 import com.mapbox.api.directions.v5.DirectionsCriteria
 import com.mapbox.api.directions.v5.models.Bearing
@@ -81,6 +82,7 @@ import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.EventChannel.EventSink
 import io.flutter.plugin.common.MethodChannel
 import io.flutter.plugin.platform.PlatformView
+import kotlinx.coroutines.launch
 import org.json.JSONObject
 import java.util.Locale
 
@@ -200,6 +202,7 @@ class MapboxPlatformView(
         override fun onNewRawLocation(rawLocation: com.mapbox.common.location.Location) {}
 
         override fun onNewLocationMatcherResult(locationMatcherResult: LocationMatcherResult) {
+            val mapView = _mapView ?: return
             val enhancedLocation = locationMatcherResult.enhancedLocation
             navigationLocationProvider.changePosition(
                 location = enhancedLocation,
@@ -328,7 +331,21 @@ class MapboxPlatformView(
                 enabled = true
                 puckBearingEnabled = true
             }
-            _mapView?.gestures?.addOnMapLongClickListener { point ->
+            _mapView?.gestures?.addOnMapClickListener { point ->
+                val map = _mapView?.mapboxMap ?: return@addOnMapClickListener false
+                lifecycleHelper?.lifecycleScope?.launch {
+
+                    routeLineApi.findClosestRoute(point, map, 20f) { expected ->
+                        expected.fold(
+                            { error ->
+                                Log.d(TAG, "Rota não encontrada: ${error}")
+                            },
+                            { closestRouteValue ->
+                                selectNewPrimaryRoute(closestRouteValue.navigationRoute)
+                            }
+                        )
+                    }
+                }
                 true
             }
             navigationCamera?.requestNavigationCameraToOverview()
@@ -338,6 +355,27 @@ class MapboxPlatformView(
             Log.e(TAG, "MapView não foi inicializado corretamente ou falhou ao carregar o estilo.")
             sendEvent("error", mapOf("message" to "MapView failed to initialize or load style."))
         }
+    }
+
+    private fun selectNewPrimaryRoute(newPrimaryRoute: NavigationRoute) {
+        val map = _mapView?.mapboxMap ?: return
+        val style = map.getStyle() ?: return
+        val allRoutes = routeLineApi.getNavigationRoutes().toMutableList()
+
+        allRoutes.remove(newPrimaryRoute)
+        allRoutes.add(0, newPrimaryRoute)
+
+        routeLineApi.setNavigationRoutes(allRoutes) { value ->
+            routeLineView.renderRouteDrawData(style, value)
+        }
+        mapboxNavigation?.setNavigationRoutes(allRoutes)
+        currentDirectionsRoute = newPrimaryRoute.directionsRoute
+        sendEvent("routeSelected", mapOf(
+            "routeId" to newPrimaryRoute.directionsRoute.hashCode().toString(),
+            "distance" to newPrimaryRoute.directionsRoute.distance(),
+            "duration" to newPrimaryRoute.directionsRoute.duration()
+        ))
+        Log.d(TAG, "Nova rota selecionada via clique no mapa.")
     }
 
     override fun onFlutterViewAttached(flutterView: View) {
@@ -437,6 +475,7 @@ class MapboxPlatformView(
 
     @SuppressLint("MissingPermission")
     fun createRoute(origin: List<Double>?, destination: List<Double>?, waypoints: List<List<Double>>?) {
+        val mapView = _mapView ?: return
         if (mapboxNavigation == null) {
             Log.e(TAG, "MapboxNavigation não está inicializado.")
             sendEvent("error", mapOf("message" to "MapboxNavigation não está inicializado."))
