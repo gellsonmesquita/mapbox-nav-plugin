@@ -528,17 +528,17 @@ class MapboxPlatformView(
                     if (routes.isNotEmpty()) {
                         mapboxNavigation?.setNavigationRoutes(emptyList())
                         mapboxNavigation?.setNavigationRoutes(routes)
-                        navigationCamera?.requestNavigationCameraToOverview()
+                        if (isDestinationChange) {
+                            setRouteAndStartNavigation()
+                        }else {
+                            navigationCamera?.requestNavigationCameraToOverview()
+                        }
                         sendEvent("routeCreated", mapOf(
                             "routeId" to routes.first().directionsRoute.hashCode().toString(),
                             "routeCount" to routes.size,
                             "distance" to routes.first().directionsRoute.distance(),
                             "duration" to routes.first().directionsRoute.duration()
                         ))
-                        if (isDestinationChange) {
-                            setRouteAndStartNavigation()
-                            navigationCamera?.requestNavigationCameraToFollowing()
-                        }
                     } else {
                         Log.d(TAG, "Nenhuma rota encontrada.")
                         sendEvent("routeCreated", mapOf("routeCount" to 0))
@@ -621,7 +621,7 @@ class MapboxPlatformView(
     }
 
     fun cancelNavigation() {
-        mapboxNavigation?.stopTripSession()
+        //mapboxNavigation?.stopTripSession()
         mapboxNavigation?.setNavigationRoutes(emptyList())
         _mapView?.mapboxMap?.style?.let { style ->
             routeLineApi.cancel()
