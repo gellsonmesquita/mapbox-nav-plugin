@@ -113,13 +113,14 @@ class MethodChannelHandler : MethodChannel.MethodCallHandler {
         }
 
         val newDestination = call.argument<List<Double>>("newDestination")
+        val origin = call.argument<List<Double>>("origin")
 
         if (newDestination == null) {
             result.error("MISSING_ARG", "New destination is required", null)
             return
         }
 
-        targetView.changeDestination(newDestination)
+        targetView.changeDestination(origin, newDestination)
         result.success(true)
     }
 

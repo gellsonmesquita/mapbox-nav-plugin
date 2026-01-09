@@ -43,11 +43,11 @@ class MapboxnavPlugin : FlutterPlugin, ActivityAware {
   @RequiresApi(Build.VERSION_CODES.BAKLAVA)
   override fun onDetachedFromEngine(binding: FlutterPlugin.FlutterPluginBinding) {
     Logger.d("Plugin detached from engine")
-    methodChannel?.setMethodCallHandler(null)
-    methodChannel = null
-    MapboxViewManager.clearAllViews()
-    binaryMessenger = null
-    platformViewRegistry = null
+    //methodChannel?.setMethodCallHandler(null)
+    //methodChannel = null
+    //MapboxViewManager.clearAllViews()
+    //binaryMessenger = null
+    //platformViewRegistry = null
   }
 
   override fun onAttachedToActivity(binding: ActivityPluginBinding) {

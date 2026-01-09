@@ -77,10 +77,12 @@ class MapboxNavigationController extends ChangeNotifier {
   }
 
   Future<void> changeDestination({
+    List<double>? origin,
     required List<double> newDestination,
   }) async {
     await _methodChannel.invokeMethod('changeDestination', {
       'viewId': _viewId,
+      'origin': origin,
       'newDestination': newDestination,
     });
   }

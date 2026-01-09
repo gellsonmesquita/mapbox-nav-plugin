@@ -1,7 +1,6 @@
 package com.plugin.mapboxnav.presentation.views
 
 import android.Manifest
-import android.R
 import android.annotation.SuppressLint
 import android.content.Context
 import android.content.res.Configuration
@@ -16,7 +15,6 @@ import androidx.lifecycle.LifecycleRegistry
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.setViewTreeLifecycleOwner
 import com.mapbox.api.directions.v5.DirectionsCriteria
-import com.mapbox.api.directions.v5.models.Bearing
 import com.mapbox.api.directions.v5.models.DirectionsRoute
 import com.mapbox.api.directions.v5.models.RouteOptions
 import com.mapbox.bindgen.Expected
@@ -388,11 +386,11 @@ class MapboxPlatformView(
         mapView?.setViewTreeLifecycleOwner(lifecycleHelper)
     }
 
-    override fun onFlutterViewDetached() {
-        lifecycleHelper?.dispose()
-        lifecycleHelper = null
-        mapView?.setViewTreeLifecycleOwner(null)
-    }
+//    override fun onFlutterViewDetached() {
+//        //lifecycleHelper?.dispose()
+//        //lifecycleHelper = null
+//        //mapView?.setViewTreeLifecycleOwner(null)
+//    }
 
     @RequiresPermission(allOf = [Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION])
     private fun initializeNavigationComponents() {
@@ -581,7 +579,7 @@ class MapboxPlatformView(
     }
 
     @RequiresPermission(allOf = [Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION])
-    fun changeDestination(newDestination: List<Double>) {
+    fun changeDestination(origin: List<Double>?,newDestination: List<Double>) {
         if (mapboxNavigation == null) {
             Log.e(TAG, "MapboxNavigation não está inicializado para mudar destino.")
             sendEvent("error", mapOf("message" to "MapboxNavigation not initialized for changing destination."))
@@ -602,8 +600,17 @@ class MapboxPlatformView(
             sendEvent("error", mapOf("message" to "Novo destino fora do intervalo válido. Latitude: -90 a 90, Longitude: -180 a 180."))
             return
         }
-
-        val currentLocation = navigationLocationProvider.lastLocation
+        val currentLocation = if (navigationLocationProvider.lastLocation != null) {
+            navigationLocationProvider.lastLocation
+        } else if (origin != null && origin.size == 2) {
+            com.mapbox.common.location.Location.Builder()
+                .latitude(origin[0])
+                .longitude(origin[1])
+                .build()
+        } else {
+            null
+        }
+        Log.d(TAG, "Destino alterado, recalculando rota.")
         if (currentLocation != null) {
             createRoute(
                 origin = listOf(currentLocation.latitude, currentLocation.longitude),
