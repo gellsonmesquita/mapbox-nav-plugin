@@ -386,12 +386,6 @@ class MapboxPlatformView(
         mapView?.setViewTreeLifecycleOwner(lifecycleHelper)
     }
 
-//    override fun onFlutterViewDetached() {
-//        //lifecycleHelper?.dispose()
-//        //lifecycleHelper = null
-//        //mapView?.setViewTreeLifecycleOwner(null)
-//    }
-
     @RequiresPermission(allOf = [Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION])
     private fun initializeNavigationComponents() {
         if (MapboxOptions.accessToken.isEmpty()) {
@@ -654,24 +648,14 @@ class MapboxPlatformView(
         val currentRoutes = routeLineApi.getNavigationRoutes()
         if (currentRoutes.isNotEmpty()) {
             mapboxNavigation?.setNavigationRoutes(currentRoutes)
-            navigationCamera?.requestNavigationCameraToFollowing()
             mapboxNavigation?.startTripSession()
+            navigationCamera?.requestNavigationCameraToFollowing()
             sendEvent("navigationStarted", null)
         }
         sendEvent("navigationStarted", null)
     }
 
-    @RequiresPermission(allOf = [Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION])
-    private fun startSimulation(route: DirectionsRoute) {
-        mapboxNavigation?.mapboxReplayer?.stop()
-        mapboxNavigation?.mapboxReplayer?.clearEvents()
-        val replayData = replayRouteMapper.mapDirectionsRouteGeometry(route)
-        mapboxNavigation?.mapboxReplayer?.pushEvents(replayData)
-        mapboxNavigation?.mapboxReplayer?.seekTo(replayData[0])
-        mapboxNavigation?.mapboxReplayer?.play()
-        mapboxNavigation?.startTripSession()
-        Log.d(TAG, "Simulação de rota iniciada.")
-    }
+
 
 
     private fun sendEvent(type: String, data: Map<String, Any?>?) {
@@ -722,7 +706,6 @@ class MapboxPlatformView(
         }
         _mapView?.gestures?.removeOnMapLongClickListener { true }
         maneuverApi.cancel()
-        //tripProgressApi.cancel()
         speechApi.cancel()
         voiceInstructionsPlayer.shutdown()
         //_mapView = null
