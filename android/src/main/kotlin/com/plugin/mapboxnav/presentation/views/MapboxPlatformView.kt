@@ -474,7 +474,7 @@ class MapboxPlatformView(
     }
 
     @SuppressLint("MissingPermission")
-    fun createRoute(origin: List<Double>?, destination: List<Double>?, waypoints: List<List<Double>>?) {
+    fun createRoute(origin: List<Double>?, destination: List<Double>?, waypoints: List<List<Double>>?, isDestinationChange: Boolean = false) {
         val mapView = _mapView ?: return
         if (mapboxNavigation == null) {
             Log.e(TAG, "MapboxNavigation não está inicializado.")
@@ -487,7 +487,6 @@ class MapboxPlatformView(
             sendEvent("error", mapOf("message" to "Coordenadas de origem ou destino inválidas. Devem conter exatamente [latitude, longitude]."))
             return
         }
-        val originLocation = navigationLocationProvider.lastLocation ?: return
         val originLat = origin[0]
         val originLng = origin[1]
         val destLat = destination[0]
@@ -499,7 +498,15 @@ class MapboxPlatformView(
             sendEvent("error", mapOf("message" to "Coordenadas fora do intervalo válido. Latitude: -90 a 90, Longitude: -180 a 180."))
             return
         }
-        val originPoint = Point.fromLngLat(originLocation.longitude, originLocation.latitude)
+        val originPoint = if (navigationLocationProvider.lastLocation != null) {
+            Point.fromLngLat(
+                navigationLocationProvider.lastLocation!!.longitude,
+                navigationLocationProvider.lastLocation!!.latitude
+            )
+        } else {
+            Log.w(TAG, "GPS lastLocation está null, a usar origin do Flutter como fallback.")
+            Point.fromLngLat(origin[1], origin[0])
+        }
         val destinationPoint = Point.fromLngLat(destLng, destLat)
 
         mapboxNavigation?.requestRoutes(
@@ -536,6 +543,9 @@ class MapboxPlatformView(
                             "distance" to routes.first().directionsRoute.distance(),
                             "duration" to routes.first().directionsRoute.duration()
                         ))
+                        if (isDestinationChange) {
+                            setRouteAndStartNavigation()
+                        }
                     } else {
                         Log.d(TAG, "Nenhuma rota encontrada.")
                         sendEvent("routeCreated", mapOf("routeCount" to 0))
@@ -594,12 +604,11 @@ class MapboxPlatformView(
 
         val currentLocation = navigationLocationProvider.lastLocation
         if (currentLocation != null) {
-            val originPoint = Point.fromLngLat(currentLocation.longitude, currentLocation.latitude)
-            cancelNavigation()
-            startNavigation(
+            createRoute(
                 origin = listOf(currentLocation.latitude, currentLocation.longitude),
                 destination = listOf(newDestLat, newDestLng),
-                waypoints = null
+                waypoints = null,
+                isDestinationChange = true
             )
             sendEvent("destinationChanged", mapOf("newDestinationLat" to newDestLat, "newDestinationLng" to newDestLng))
             Log.d(TAG, "Destino alterado, recalculando rota.")
