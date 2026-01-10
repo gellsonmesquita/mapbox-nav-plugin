@@ -500,7 +500,7 @@ class MapboxPlatformView(
             Point.fromLngLat(origin[1], origin[0])
         }
         val destinationPoint = Point.fromLngLat(destLng, destLat)
-
+        mapboxNavigation?.stopTripSession()
         mapboxNavigation?.requestRoutes(
             RouteOptions.builder()
                 .applyDefaultNavigationOptions()
@@ -531,7 +531,7 @@ class MapboxPlatformView(
                         if (isDestinationChange) {
                             setRouteAndStartNavigation()
                         }else {
-                            //navigationCamera?.requestNavigationCameraToOverview()
+                            navigationCamera?.requestNavigationCameraToOverview()
                         }
                         sendEvent("routeCreated", mapOf(
                             "routeId" to routes.first().directionsRoute.hashCode().toString(),
@@ -594,23 +594,60 @@ class MapboxPlatformView(
             sendEvent("error", mapOf("message" to "Novo destino fora do intervalo válido. Latitude: -90 a 90, Longitude: -180 a 180."))
             return
         }
-        val currentLocation = if (navigationLocationProvider.lastLocation != null) {
-            navigationLocationProvider.lastLocation
-        } else if (origin != null && origin.size == 2) {
-            com.mapbox.common.location.Location.Builder()
-                .latitude(origin[0])
-                .longitude(origin[1])
-                .build()
+
+        val originPoint = if (navigationLocationProvider.lastLocation != null) {
+            Point.fromLngLat(
+                navigationLocationProvider.lastLocation!!.longitude,
+                navigationLocationProvider.lastLocation!!.latitude
+            )
         } else {
-            null
+            Log.w(TAG, "GPS lastLocation está null, a usar origin do Flutter como fallback.")
+            origin?.let { Point.fromLngLat(origin[1], it[0]) }
         }
+        val destinationPoint = Point.fromLngLat(newDestLng, newDestLat)
         Log.d(TAG, "Destino alterado, recalculando rota.")
-        if (currentLocation != null) {
-            createRoute(
-                origin = listOf(currentLocation.latitude, currentLocation.longitude),
-                destination = listOf(newDestLat, newDestLng),
-                waypoints = null,
-                isDestinationChange = true
+        if (originPoint != null) {
+            mapboxNavigation?.requestRoutes(
+                RouteOptions.builder()
+                    .applyDefaultNavigationOptions()
+                    .applyLanguageAndVoiceUnitOptions(context)
+                    .coordinatesList(listOf(originPoint, destinationPoint))
+                    .profile(DirectionsCriteria.PROFILE_DRIVING_TRAFFIC)
+                    .steps(true)
+                    .voiceInstructions(true)
+                    .alternatives(true)
+                    .language("pt")
+                    .build(),
+                object : NavigationRouterCallback {
+                    override fun onCanceled(routeOptions: RouteOptions, routerOrigin: String) {
+                        Log.d(TAG, "Cálculo de rota cancelado.")
+                        sendEvent("routeCanceled", null)
+                    }
+
+                    override fun onFailure(reasons: List<RouterFailure>, routeOptions: RouteOptions) {
+                        val message = reasons.joinToString(", ") { it.message }
+                        Log.e(TAG, "Falha no cálculo de rota: $message")
+                        sendEvent("error", mapOf("type" to "routeCalculationFailure", "message" to message))
+                    }
+
+                    @RequiresPermission(allOf = [Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION])
+                    override fun onRoutesReady(routes: List<NavigationRoute>, routerOrigin: String) {
+                        if (routes.isNotEmpty()) {
+                            mapboxNavigation?.setNavigationRoutes(emptyList())
+                            mapboxNavigation?.setNavigationRoutes(routes)
+                            setRouteAndStartNavigation()
+                            sendEvent("routeCreated", mapOf(
+                                "routeId" to routes.first().directionsRoute.hashCode().toString(),
+                                "routeCount" to routes.size,
+                                "distance" to routes.first().directionsRoute.distance(),
+                                "duration" to routes.first().directionsRoute.duration()
+                            ))
+                        } else {
+                            Log.d(TAG, "Nenhuma rota encontrada.")
+                            sendEvent("routeCreated", mapOf("routeCount" to 0))
+                        }
+                    }
+                }
             )
             sendEvent("destinationChanged", mapOf("newDestinationLat" to newDestLat, "newDestinationLng" to newDestLng))
             Log.d(TAG, "Destino alterado, recalculando rota.")
