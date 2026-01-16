@@ -211,6 +211,7 @@ class _NavigationScreenState extends State<NavigationScreen> {
                                     ? null
                                     : () {
                                   _controller!.changeDestination(
+                                    origin: _origin,
                                     newDestination: _newDestination,
                                   );
                                 },

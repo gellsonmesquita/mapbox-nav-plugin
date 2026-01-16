@@ -590,8 +590,8 @@ class MapboxPlatformView(
             sendEvent("error", mapOf("message" to "Novo destino fora do intervalo válido. Latitude: -90 a 90, Longitude: -180 a 180."))
             return
         }
-        val originPoint = if (navigationLocationProvider.lastLocation != null) {
-            origin?.let { Point.fromLngLat(it[1], it[0]) }
+        val originPoint = if (origin?.size == 2) {
+            origin.let { Point.fromLngLat(it[1], it[0]) }
         } else {
             Point.fromLngLat(
                 navigationLocationProvider.lastLocation!!.longitude,
