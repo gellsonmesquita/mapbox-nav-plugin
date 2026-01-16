@@ -114,9 +114,7 @@ class MapboxPlatformView(
     private lateinit var tripProgressApi: MapboxTripProgressApi
     private lateinit var speechApi: MapboxSpeechApi
     private lateinit var voiceInstructionsPlayer: MapboxVoiceInstructionsPlayer
-
     private val navigationLocationProvider = NavigationLocationProvider()
-    private val replayRouteMapper = ReplayRouteMapper()
     private var currentDirectionsRoute: DirectionsRoute? = null
     private var isVoiceInstructionsMuted = false
         set(value) {
@@ -172,7 +170,9 @@ class MapboxPlatformView(
             viewportDataSource.evaluate()
             sendEvent("routeCreated", mapOf(
                 "routeId" to primaryRoute.directionsRoute.hashCode().toString(),
-                "routeCount" to routeUpdateResult.navigationRoutes.size
+                "routeCount" to routeUpdateResult.navigationRoutes.size,
+                "distance" to currentDirectionsRoute?.distance(),
+                "duration" to currentDirectionsRoute?.duration()
             ))
         } else {
             routeLineApi.clearRouteLine { value ->
@@ -187,8 +187,8 @@ class MapboxPlatformView(
             currentDirectionsRoute = null
             sendEvent("routeCreated", mapOf(
                 "routeCount" to 0,
-                "distance" to currentDirectionsRoute?.distance(),
-                "duration" to currentDirectionsRoute?.duration()
+                "distance" to 0,
+                "duration" to 0
             ))
             Log.d(TAG, "Nenhuma rota encontrada no RouteObserver.")
         }
@@ -412,7 +412,7 @@ class MapboxPlatformView(
                 defaultPitch = 45.0
                 minZoom = 12.0
                 maxZoom = 18.0
-                focalPoint = FollowingFrameOptions.FocalPoint(0.5, 0.85)
+                focalPoint = FollowingFrameOptions.FocalPoint(0.5, 1.0)
                 pitchNearManeuvers.enabled = true
             }
             overviewFrameOptions.apply {
@@ -526,13 +526,8 @@ class MapboxPlatformView(
 
                 override fun onRoutesReady(routes: List<NavigationRoute>, routerOrigin: String) {
                     if (routes.isNotEmpty()) {
-                        mapboxNavigation?.setNavigationRoutes(emptyList())
                         mapboxNavigation?.setNavigationRoutes(routes)
-                        if (isDestinationChange) {
-                            setRouteAndStartNavigation()
-                        }else {
-                            navigationCamera?.requestNavigationCameraToOverview()
-                        }
+                        navigationCamera?.requestNavigationCameraToOverview()
                         sendEvent("routeCreated", mapOf(
                             "routeId" to routes.first().directionsRoute.hashCode().toString(),
                             "routeCount" to routes.size,
@@ -589,21 +584,21 @@ class MapboxPlatformView(
         val newDestLat = newDestination[0]
         val newDestLng = newDestination[1]
 
+
         if (!isValidCoordinate(newDestLat, true) || !isValidCoordinate(newDestLng, false)) {
             Log.e(TAG, "Novo destino fora do intervalo válido: [$newDestLat, $newDestLng]")
             sendEvent("error", mapOf("message" to "Novo destino fora do intervalo válido. Latitude: -90 a 90, Longitude: -180 a 180."))
             return
         }
-
         val originPoint = if (navigationLocationProvider.lastLocation != null) {
+            origin?.let { Point.fromLngLat(it[1], it[0]) }
+        } else {
             Point.fromLngLat(
                 navigationLocationProvider.lastLocation!!.longitude,
                 navigationLocationProvider.lastLocation!!.latitude
             )
-        } else {
-            Log.w(TAG, "GPS lastLocation está null, a usar origin do Flutter como fallback.")
-            origin?.let { Point.fromLngLat(origin[1], it[0]) }
         }
+
         val destinationPoint = Point.fromLngLat(newDestLng, newDestLat)
         Log.d(TAG, "Destino alterado, recalculando rota.")
         if (originPoint != null) {
@@ -633,7 +628,6 @@ class MapboxPlatformView(
                     @RequiresPermission(allOf = [Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION])
                     override fun onRoutesReady(routes: List<NavigationRoute>, routerOrigin: String) {
                         if (routes.isNotEmpty()) {
-                            mapboxNavigation?.setNavigationRoutes(emptyList())
                             mapboxNavigation?.setNavigationRoutes(routes)
                             setRouteAndStartNavigation()
                             sendEvent("routeCreated", mapOf(

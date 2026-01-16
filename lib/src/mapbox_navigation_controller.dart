@@ -9,6 +9,7 @@ class MapboxNavigationController extends ChangeNotifier {
   final int _viewId;
   late final MethodChannel _methodChannel;
   late final EventChannel _eventChannel;
+  late final MethodChannel _methodEventChannel;
 
   final StreamController<MapboxNavigationEvent> _eventStreamController =
   StreamController<MapboxNavigationEvent>.broadcast();
@@ -18,6 +19,7 @@ class MapboxNavigationController extends ChangeNotifier {
   MapboxNavigationController(this._viewId) {
     _methodChannel = const MethodChannel('nav_channel');
     _eventChannel = EventChannel('nav_event/$_viewId');
+    _methodEventChannel = MethodChannel('nav_event/$_viewId/methods');
     _listenToEvents();
   }
 
@@ -84,6 +86,30 @@ class MapboxNavigationController extends ChangeNotifier {
       'viewId': _viewId,
       'origin': origin,
       'newDestination': newDestination,
+    });
+  }
+
+  Future<void> recenter() async {
+    await _methodEventChannel.invokeMethod('recenter', {
+      'viewId': _viewId,
+    });
+  }
+
+  Future<void> toggleVoiceInstructions() async {
+    await _methodEventChannel.invokeMethod('toggleVoiceInstructions', {
+      'viewId': _viewId,
+    });
+  }
+
+  Future<void> showRouteOverview() async {
+    await _methodEventChannel.invokeMethod('showRouteOverview', {
+      'viewId': _viewId,
+    });
+  }
+
+  Future<void> requestNavigationCameraToOverview() async {
+    await _methodEventChannel.invokeMethod('requestNavigationCameraToOverview', {
+      'viewId': _viewId,
     });
   }
 
