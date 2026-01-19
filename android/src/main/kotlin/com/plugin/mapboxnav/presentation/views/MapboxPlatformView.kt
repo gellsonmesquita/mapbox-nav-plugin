@@ -500,7 +500,7 @@ class MapboxPlatformView(
             Point.fromLngLat(origin[1], origin[0])
         }
         val destinationPoint = Point.fromLngLat(destLng, destLat)
-        mapboxNavigation?.stopTripSession()
+        mapboxNavigation?.setNavigationRoutes(emptyList())
         mapboxNavigation?.requestRoutes(
             RouteOptions.builder()
                 .applyDefaultNavigationOptions()
