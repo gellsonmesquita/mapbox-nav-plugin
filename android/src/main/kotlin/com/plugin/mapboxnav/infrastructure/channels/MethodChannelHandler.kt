@@ -36,15 +36,17 @@ class MethodChannelHandler : MethodChannel.MethodCallHandler {
                 targetView?.downloadRegionOffline(region,north, east, south, west)
                 result.success(null)
             }
-
             "startNavigation" -> {
                 handleStartNavigation(call, result, targetView)
             }
-
+            "toggleTraffic" -> {
+                val show = call.argument<Boolean>("show") ?: true
+                targetView?.toggleTraffic(show)
+                result.success(null)
+            }
             "changeDestination" -> {
                 handleChangeDestination(call, result, targetView)
             }
-
             "cancelNavigation" -> {
                 handleSimpleAction(targetView, result) { it.cancelNavigation() }
             }

@@ -20,12 +20,18 @@ import com.mapbox.api.directions.v5.models.RouteOptions
 import com.mapbox.bindgen.Expected
 import com.mapbox.bindgen.Value
 import com.mapbox.common.MapboxOptions
+import com.mapbox.common.TileRegionLoadOptions
+import com.mapbox.common.TileStore
+import com.mapbox.common.TileStoreOptions
+import com.mapbox.geojson.LineString
 import com.mapbox.geojson.Point
+import com.mapbox.geojson.Polygon
 import com.mapbox.maps.CameraOptions
-import com.mapbox.maps.CoordinateBounds
 import com.mapbox.maps.EdgeInsets
-import com.mapbox.maps.GlyphsRasterizationMode
 import com.mapbox.maps.MapView
+import com.mapbox.maps.OfflineManager
+import com.mapbox.maps.TilesetDescriptorOptions
+import com.mapbox.maps.extension.style.layers.getLayer
 import com.mapbox.maps.plugin.animation.camera
 import com.mapbox.maps.plugin.attribution.attribution
 import com.mapbox.maps.plugin.gestures.gestures
@@ -44,7 +50,6 @@ import com.mapbox.navigation.core.MapboxNavigation
 import com.mapbox.navigation.core.directions.session.RoutesObserver
 import com.mapbox.navigation.core.formatter.MapboxDistanceFormatter
 import com.mapbox.navigation.core.lifecycle.MapboxNavigationApp
-import com.mapbox.navigation.core.replay.route.ReplayRouteMapper
 import com.mapbox.navigation.core.trip.session.LocationMatcherResult
 import com.mapbox.navigation.core.trip.session.LocationObserver
 import com.mapbox.navigation.core.trip.session.RouteProgressObserver
@@ -86,14 +91,8 @@ import io.flutter.plugin.platform.PlatformView
 import kotlinx.coroutines.launch
 import org.json.JSONObject
 import java.util.Locale
-import com.mapbox.common.TileRegionLoadOptions
-import com.mapbox.common.TileStore
-import com.mapbox.common.TileStoreOptions
-import com.mapbox.geojson.LineString
-import com.mapbox.geojson.Polygon
-import com.mapbox.maps.OfflineManager
-import com.mapbox.maps.StylePackLoadOptions
-import com.mapbox.maps.TilesetDescriptorOptions
+import com.mapbox.maps.extension.style.layers.properties.generated.Visibility
+
 
 @OptIn(ExperimentalPreviewMapboxNavigationAPI::class)
 class MapboxPlatformView(
@@ -364,6 +363,11 @@ class MapboxPlatformView(
             )
             addView(_mapView)
         }
+        _mapView?.mapboxMap?.apply {
+            val glyphsOptions = com.mapbox.maps.GlyphsRasterizationOptions.Builder()
+                .rasterizationMode(com.mapbox.maps.GlyphsRasterizationMode.IDEOGRAPHS_RASTERIZED_LOCALLY)
+                .build()
+        }
 
         _mapView?.mapboxMap?.loadStyle(NavigationStyles.NAVIGATION_DAY_STYLE) { style ->
             _mapView?.mapboxMap?.setCamera(
@@ -604,9 +608,11 @@ class MapboxPlatformView(
                 .coordinatesList(listOf(originPoint, destinationPoint))
                 .profile(DirectionsCriteria.PROFILE_DRIVING)
                 .steps(true)
+                .annotationsList(listOf(DirectionsCriteria.ANNOTATION_DISTANCE, DirectionsCriteria.ANNOTATION_DURATION))
                 .voiceInstructions(true)
-                .alternatives(true)
+                .alternatives(false)
                 .language("pt")
+                .enableRefresh(false)
                 .build(),
             object : NavigationRouterCallback {
                 override fun onCanceled(routeOptions: RouteOptions, routerOrigin: String) {
@@ -661,6 +667,14 @@ class MapboxPlatformView(
         setRouteAndStartNavigation()
         sendEvent("navigationStarted", null)
         Log.d(TAG, "Navegação iniciada.")
+    }
+
+    fun toggleTraffic(show: Boolean) {
+        _mapView?.mapboxMap?.getStyle() { style ->
+            style.getLayer("traffic")?.apply {
+                visibility(if (show) Visibility.VISIBLE else Visibility.NONE)
+            }
+        }
     }
 
     @RequiresPermission(allOf = [Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION])
