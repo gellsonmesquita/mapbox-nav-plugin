@@ -28,6 +28,10 @@ import com.mapbox.geojson.Point
 import com.mapbox.geojson.Polygon
 import com.mapbox.maps.CameraOptions
 import com.mapbox.maps.EdgeInsets
+import com.mapbox.maps.GlyphsRasterizationMode
+import com.mapbox.maps.GlyphsRasterizationOptions
+import com.mapbox.maps.MapInitOptions
+import com.mapbox.maps.MapOptions
 import com.mapbox.maps.MapView
 import com.mapbox.maps.OfflineManager
 import com.mapbox.maps.TilesetDescriptorOptions
@@ -92,6 +96,8 @@ import kotlinx.coroutines.launch
 import org.json.JSONObject
 import java.util.Locale
 import com.mapbox.maps.extension.style.layers.properties.generated.Visibility
+import com.mapbox.navigation.base.options.IncidentsOptions
+import com.mapbox.navigation.base.route.RouteRefreshOptions
 
 
 @OptIn(ExperimentalPreviewMapboxNavigationAPI::class)
@@ -355,18 +361,24 @@ class MapboxPlatformView(
 
     @SuppressLint("MissingPermission")
     private fun initMapView() {
-        _mapView = MapView(context)
+        val glyphsOptions = GlyphsRasterizationOptions.Builder()
+            .rasterizationMode(GlyphsRasterizationMode.IDEOGRAPHS_RASTERIZED_LOCALLY)
+            .build()
+        val mapOptions = MapOptions.Builder()
+            .glyphsRasterizationOptions(glyphsOptions)
+            .build()
+        val mapInitOptions = MapInitOptions(
+            context = context,
+            mapOptions = mapOptions,
+            styleUri = NavigationStyles.NAVIGATION_DAY_STYLE
+        )
+        _mapView = MapView(context, mapInitOptions)
         containerView = FrameLayout(context).apply {
             layoutParams = FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT
             )
             addView(_mapView)
-        }
-        _mapView?.mapboxMap?.apply {
-            val glyphsOptions = com.mapbox.maps.GlyphsRasterizationOptions.Builder()
-                .rasterizationMode(com.mapbox.maps.GlyphsRasterizationMode.IDEOGRAPHS_RASTERIZED_LOCALLY)
-                .build()
         }
 
         _mapView?.mapboxMap?.loadStyle(NavigationStyles.NAVIGATION_DAY_STYLE) { style ->
