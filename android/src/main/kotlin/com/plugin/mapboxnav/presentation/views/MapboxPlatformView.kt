@@ -18,10 +18,13 @@ import com.mapbox.api.directions.v5.DirectionsCriteria
 import com.mapbox.api.directions.v5.models.DirectionsRoute
 import com.mapbox.api.directions.v5.models.RouteOptions
 import com.mapbox.bindgen.Expected
+import com.mapbox.bindgen.Value
 import com.mapbox.common.MapboxOptions
 import com.mapbox.geojson.Point
 import com.mapbox.maps.CameraOptions
+import com.mapbox.maps.CoordinateBounds
 import com.mapbox.maps.EdgeInsets
+import com.mapbox.maps.GlyphsRasterizationMode
 import com.mapbox.maps.MapView
 import com.mapbox.maps.plugin.animation.camera
 import com.mapbox.maps.plugin.attribution.attribution
@@ -83,6 +86,14 @@ import io.flutter.plugin.platform.PlatformView
 import kotlinx.coroutines.launch
 import org.json.JSONObject
 import java.util.Locale
+import com.mapbox.common.TileRegionLoadOptions
+import com.mapbox.common.TileStore
+import com.mapbox.common.TileStoreOptions
+import com.mapbox.geojson.LineString
+import com.mapbox.geojson.Polygon
+import com.mapbox.maps.OfflineManager
+import com.mapbox.maps.StylePackLoadOptions
+import com.mapbox.maps.TilesetDescriptorOptions
 
 @OptIn(ExperimentalPreviewMapboxNavigationAPI::class)
 class MapboxPlatformView(
@@ -124,6 +135,9 @@ class MapboxPlatformView(
         }
     private var lifecycleHelper: LifecycleHelper? = null
 
+    private val tileStore: TileStore by lazy { TileStore.create() }
+    private val offlineManager: OfflineManager by lazy { OfflineManager() }
+
     private val pixelDensity = context.resources.displayMetrics.density
     private val overviewPadding: EdgeInsets by lazy {
         EdgeInsets(
@@ -163,6 +177,7 @@ class MapboxPlatformView(
             val primaryRoute = routeUpdateResult.navigationRoutes.first()
             currentDirectionsRoute = primaryRoute.directionsRoute
             Log.d(TAG, "Rota atualizada. Distância da rota: ${primaryRoute.directionsRoute.distance()}")
+            cacheRouteData(primaryRoute)
             routeLineApi.setNavigationRoutes(routeUpdateResult.navigationRoutes) { value ->
                 _mapView?.mapboxMap?.style?.apply { routeLineView.renderRouteDrawData(this, value) }
             }
@@ -282,6 +297,8 @@ class MapboxPlatformView(
         eventChannel = EventChannel(messenger, "$eventChannelBaseName/$viewId")
         eventChannel.setStreamHandler(this)
         methodChannel = MethodChannel(messenger, "$eventChannelBaseName/$viewId/methods")
+        val fiveGigabytes = 5L * 1024 * 1024 * 1024
+        tileStore.setOption(TileStoreOptions.DISK_QUOTA, Value(fiveGigabytes))
         methodChannel.setMethodCallHandler { call, result ->
             when (call.method) {
                 "toggleVoiceInstructions" -> {
@@ -302,6 +319,39 @@ class MapboxPlatformView(
             }
         }
         initMapView()
+    }
+
+
+    private fun cacheRouteData(navigationRoute: NavigationRoute) {
+        val geometryStr = navigationRoute.directionsRoute.geometry() ?: return
+        val routeId = "route_cache_${navigationRoute.directionsRoute.hashCode()}"
+
+        tileStore.getAllTileRegions { expected ->
+            if (expected.isValue && expected.value?.any { it.id == routeId } == true) {
+                Log.d(TAG, "Rota já em cache: $routeId")
+                return@getAllTileRegions
+            }
+
+            val tilesetDescriptor = offlineManager.createTilesetDescriptor(
+                TilesetDescriptorOptions.Builder()
+                    .styleURI(NavigationStyles.NAVIGATION_DAY_STYLE)
+                    .minZoom(0)
+                    .maxZoom(15)
+                    .build()
+            )
+
+            val routeGeometry = LineString.fromPolyline(geometryStr, 6)
+
+            val options = TileRegionLoadOptions.Builder()
+                .geometry(routeGeometry)
+                .descriptors(listOf(tilesetDescriptor))
+                .acceptExpired(true)
+                .build()
+
+            tileStore.loadTileRegion(routeId, options, { }, { expectedResult ->
+                if (expectedResult.isValue) Log.d(TAG, "Corredor da rota salvo offline.")
+            })
+        }
     }
 
     @SuppressLint("MissingPermission")
@@ -332,7 +382,6 @@ class MapboxPlatformView(
             _mapView?.gestures?.addOnMapClickListener { point ->
                 val map = _mapView?.mapboxMap ?: return@addOnMapClickListener false
                 lifecycleHelper?.lifecycleScope?.launch {
-
                     routeLineApi.findClosestRoute(point, map, 20f) { expected ->
                         expected.fold(
                             { error ->
@@ -346,7 +395,6 @@ class MapboxPlatformView(
                 }
                 true
             }
-            //navigationCamera?.requestNavigationCameraToOverview()
             sendEvent("pluginInitialized", mapOf("viewId" to viewId))
             initializeNavigationComponents()
         } ?: run {
@@ -386,6 +434,53 @@ class MapboxPlatformView(
         mapView?.setViewTreeLifecycleOwner(lifecycleHelper)
     }
 
+    fun downloadRegionOffline(region: String, north: Double, east: Double, south: Double, west: Double) {
+
+        val coordinates = listOf(
+            listOf(
+                Point.fromLngLat(west, north),
+                Point.fromLngLat(east, north),
+                Point.fromLngLat(east, south),
+                Point.fromLngLat(west, south),
+                Point.fromLngLat(west, north)
+            )
+        )
+        val areaGeometry = Polygon.fromLngLats(coordinates)
+
+        val tilesetDescriptor = offlineManager.createTilesetDescriptor(
+            TilesetDescriptorOptions.Builder()
+                .styleURI(NavigationStyles.NAVIGATION_DAY_STYLE)
+                .minZoom(0)
+                .maxZoom(15)
+                .build()
+        )
+
+
+        val tileRegionLoadOptions = TileRegionLoadOptions.Builder()
+            .geometry(areaGeometry)
+            .descriptors(listOf(tilesetDescriptor))
+            .acceptExpired(true)
+            .build()
+
+        tileStore.loadTileRegion(
+            region,
+            tileRegionLoadOptions,
+            { progress ->
+                val percent = progress.completedResourceCount.toDouble() / progress.requiredResourceCount * 100
+                sendEvent("offlineDownloadProgress", mapOf("percent" to percent))
+            },
+            { expected ->
+                    if (expected.isError) {
+                        Log.e(TAG, "Erro no download de $region: ${expected.error}")
+                        sendEvent("error", mapOf("message" to expected.error.toString()))
+                    } else {
+                        Log.d(TAG, "Região $region baixada com sucesso!")
+                        sendEvent("offlineDownloadComplete", mapOf("id" to region))
+                    }
+            }
+
+        )
+    }
     @RequiresPermission(allOf = [Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION])
     private fun initializeNavigationComponents() {
         if (MapboxOptions.accessToken.isEmpty()) {
@@ -461,6 +556,7 @@ class MapboxPlatformView(
         Log.d(TAG, "Componentes de navegação inicializados.")
     }
 
+
     private fun isValidCoordinate(value: Double, isLatitude: Boolean): Boolean {
         return if (isLatitude) value in -90.0..90.0 else value in -180.0..180.0
     }
@@ -506,7 +602,7 @@ class MapboxPlatformView(
                 .applyDefaultNavigationOptions()
                 .applyLanguageAndVoiceUnitOptions(context)
                 .coordinatesList(listOf(originPoint, destinationPoint))
-                .profile(DirectionsCriteria.PROFILE_DRIVING_TRAFFIC)
+                .profile(DirectionsCriteria.PROFILE_DRIVING)
                 .steps(true)
                 .voiceInstructions(true)
                 .alternatives(true)
@@ -607,10 +703,10 @@ class MapboxPlatformView(
                     .applyDefaultNavigationOptions()
                     .applyLanguageAndVoiceUnitOptions(context)
                     .coordinatesList(listOf(originPoint, destinationPoint))
-                    .profile(DirectionsCriteria.PROFILE_DRIVING_TRAFFIC)
+                    .profile(DirectionsCriteria.PROFILE_DRIVING)
                     .steps(true)
                     .voiceInstructions(true)
-                    .alternatives(true)
+                    .alternatives(false)
                     .language("pt")
                     .build(),
                 object : NavigationRouterCallback {
@@ -679,14 +775,11 @@ class MapboxPlatformView(
         val currentRoutes = routeLineApi.getNavigationRoutes()
         if (currentRoutes.isNotEmpty()) {
             mapboxNavigation?.setNavigationRoutes(currentRoutes)
-            mapboxNavigation?.startTripSession()
             navigationCamera?.requestNavigationCameraToFollowing()
             sendEvent("navigationStarted", null)
         }
         sendEvent("navigationStarted", null)
     }
-
-
 
 
     private fun sendEvent(type: String, data: Map<String, Any?>?) {

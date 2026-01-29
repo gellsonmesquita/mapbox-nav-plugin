@@ -24,7 +24,17 @@ class MethodChannelHandler : MethodChannel.MethodCallHandler {
 
             "createRoute" -> {
                 handleCreateRoute(call, result, targetView)
+            }
 
+            "downloadOfflineArea" -> {
+                val args = call.arguments as Map<*, *>
+                val region = args["region"] as String
+                val north = args["north"] as Double
+                val east = args["east"] as Double
+                val south = args["south"] as Double
+                val west = args["west"] as Double
+                targetView?.downloadRegionOffline(region,north, east, south, west)
+                result.success(null)
             }
 
             "startNavigation" -> {

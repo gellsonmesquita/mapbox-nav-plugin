@@ -125,6 +125,27 @@ class MapboxNavigationController extends ChangeNotifier {
     });
   }
 
+  Future<void> downloadRegion({
+    required String region,
+    required double north,
+    required double east,
+    required double south,
+    required double west,
+  }) async {
+    try {
+      await _methodChannel.invokeMethod('downloadOfflineArea', {
+        'region': region,
+        'north': north,
+        'east': east,
+        'south': south,
+        'west': west,
+        'viewId': _viewId
+      });
+    } on PlatformException catch (e) {
+      print("Falha ao iniciar download: ${e.message}");
+    }
+  }
+
   Future<void> stopNavigation() async {
     await _methodChannel.invokeMethod('stopNavigation', {
       'viewId': _viewId,
