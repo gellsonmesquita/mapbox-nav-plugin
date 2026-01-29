@@ -731,9 +731,11 @@ class MapboxPlatformView(
                     .coordinatesList(listOf(originPoint, destinationPoint))
                     .profile(DirectionsCriteria.PROFILE_DRIVING)
                     .steps(true)
+                    .annotationsList(listOf(DirectionsCriteria.ANNOTATION_DISTANCE, DirectionsCriteria.ANNOTATION_DURATION))
                     .voiceInstructions(true)
                     .alternatives(false)
                     .language("pt")
+                    .enableRefresh(false)
                     .build(),
                 object : NavigationRouterCallback {
                     override fun onCanceled(routeOptions: RouteOptions, routerOrigin: String) {
