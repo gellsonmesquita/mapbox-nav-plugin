@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
+import 'package:mapboxnav/src/data/mapbox_config.dart';
 
 typedef MapboxNavigationEvent = Map<String, dynamic>;
 
@@ -122,6 +123,30 @@ class MapboxNavigationController extends ChangeNotifier {
   Future<void> finishNavigation() async {
     await _methodChannel.invokeMethod('finishNavigation', {
       'viewId': _viewId,
+    });
+  }
+
+  Future<void> updateRouteOptions({
+    required bool isTruck,
+    double? maxHeight,
+    double? maxWeight,
+    double? maxWidth,
+    RouteProfile profile = RouteProfile.driving,
+    List<ExcludeType> excludes = const [],
+  }) async {
+    await _methodEventChannel.invokeMethod('updateRouteOptions', {
+      'isTruck': isTruck,
+      'maxHeight': maxHeight,
+      'maxWeight': maxWeight,
+      'maxWidth': maxWidth,
+      'profile': profile.value,
+      'excludeList': excludes.map((e) => e.value).toList(),
+    });
+  }
+
+  Future<void> setForbiddenZones(List<ForbiddenZone> zones) async {
+    await _methodEventChannel.invokeMethod('setForbiddenZones', {
+      'zones': zones.map((z) => z.toList()).toList(),
     });
   }
 

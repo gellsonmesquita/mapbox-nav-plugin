@@ -98,6 +98,7 @@ import java.util.Locale
 import com.mapbox.maps.extension.style.layers.properties.generated.Visibility
 import com.mapbox.navigation.base.options.IncidentsOptions
 import com.mapbox.navigation.base.route.RouteRefreshOptions
+import com.mapbox.turf.TurfJoins
 
 
 @OptIn(ExperimentalPreviewMapboxNavigationAPI::class)
@@ -118,6 +119,16 @@ class MapboxPlatformView(
     private lateinit var containerView: View
     private var _mapView: MapView? = null
     val mapView: MapView? get() = _mapView
+    private var isTruck = true
+    private var maxHeight: Double? = null
+    private var maxWeight: Double? = null
+    private var maxWidth: Double? = null
+    private var routeProfile = DirectionsCriteria.PROFILE_DRIVING
+    private var routeLanguage = "pt"
+    private var routeUnits = DirectionsCriteria.METRIC
+    private var routeGeometryPrecision = DirectionsCriteria.GEOMETRY_POLYLINE6
+    private var avoidList = mutableListOf<String>()
+    private var forbiddenZones = mutableListOf<Polygon>()
 
     private var mapboxNavigation: MapboxNavigation? = null
     private lateinit var viewportDataSource: MapboxNavigationViewportDataSource
@@ -182,7 +193,7 @@ class MapboxPlatformView(
             val primaryRoute = routeUpdateResult.navigationRoutes.first()
             currentDirectionsRoute = primaryRoute.directionsRoute
             Log.d(TAG, "Rota atualizada. Distância da rota: ${primaryRoute.directionsRoute.distance()}")
-            cacheRouteData(primaryRoute)
+            //cacheRouteData(primaryRoute)
             routeLineApi.setNavigationRoutes(routeUpdateResult.navigationRoutes) { value ->
                 _mapView?.mapboxMap?.style?.apply { routeLineView.renderRouteDrawData(this, value) }
             }
@@ -262,8 +273,8 @@ class MapboxPlatformView(
             { maneuvers ->
                 val maneuverList = maneuvers.map { maneuver ->
                     mapOf(
-                        "instruction" to (maneuver.primary.text ?: ""),
-                        "distance" to (maneuver.stepDistance ?: 0.0)
+                        "instruction" to maneuver.primary.text,
+                        "distance" to maneuver.stepDistance
                     )
                 }
                 sendEvent("maneuverUpdate", mapOf("maneuvers" to maneuverList))
@@ -320,12 +331,43 @@ class MapboxPlatformView(
                     sendEvent("routeOverviewTriggered", null)
                     result.success(null)
                 }
+                "updateRouteOptions" -> {
+                    val args = call.arguments as? Map<String, Any>
+                    isTruck = args?.get("isTruck") as? Boolean ?: isTruck
+                    maxHeight = (args?.get("maxHeight") as? Number)?.toDouble() ?: maxHeight
+                    maxWeight = (args?.get("maxWeight") as? Number)?.toDouble() ?: maxWeight
+                    routeProfile = args?.get("profile") as? String ?: routeProfile // "driving" ou "driving-traffic"
+                    routeLanguage = args?.get("language") as? String ?: routeLanguage
+                    routeUnits = args?.get("units") as? String ?: routeUnits // "metric" ou "imperial"
+                    val flutterExclusions = args?.get("excludeList") as? List<String>
+                    if (flutterExclusions != null) {
+                        avoidList = flutterExclusions.toMutableList()
+                    }
+                    result.success(null)
+                }
+                "setForbiddenZones" -> {
+                    // {"lat": double, "lng": double}
+                    val zones = call.argument<List<List<Map<String, Double>>>>("zones")
+                    forbiddenZones.clear()
+                    zones?.forEach { polygonCoords ->
+                        val points = polygonCoords.map { coord ->
+                            Point.fromLngLat(
+                                coord["lng"] ?: 0.0,
+                                coord["lat"] ?: 0.0
+                            )
+                        }
+                        if (points.isNotEmpty()) {
+                            forbiddenZones.add(Polygon.fromLngLats(listOf(points)))
+                        }
+                    }
+                    Log.d(TAG, "Zonas proibidas atualizadas: ${forbiddenZones.size} zonas carregadas.")
+                    result.success(null)
+                }
                 else -> result.notImplemented()
             }
         }
         initMapView()
     }
-
 
     private fun cacheRouteData(navigationRoute: NavigationRoute) {
         val geometryStr = navigationRoute.directionsRoute.geometry() ?: return
@@ -341,7 +383,7 @@ class MapboxPlatformView(
                 TilesetDescriptorOptions.Builder()
                     .styleURI(NavigationStyles.NAVIGATION_DAY_STYLE)
                     .minZoom(0)
-                    .maxZoom(15)
+                    .maxZoom(13)
                     .build()
             )
 
@@ -452,40 +494,50 @@ class MapboxPlatformView(
 
     fun downloadRegionOffline(region: String, north: Double, east: Double, south: Double, west: Double) {
 
-        val coordinates = listOf(
-            listOf(
-                Point.fromLngLat(west, north),
-                Point.fromLngLat(east, north),
-                Point.fromLngLat(east, south),
-                Point.fromLngLat(west, south),
-                Point.fromLngLat(west, north)
+        tileStore.getAllTileRegions { expected ->
+            if (expected.isValue) {
+                val existingRegions = expected.value ?: emptyList()
+                if (existingRegions.any { it.id == region }) {
+                    Log.d(TAG, "A região $region já está baixada. Ignorando download.")
+                    sendEvent("offlineDownloadComplete", mapOf("id" to region, "status" to "already_exists"))
+                    return@getAllTileRegions
+                }
+            }
+
+            val coordinates = listOf(
+                listOf(
+                    Point.fromLngLat(west, north),
+                    Point.fromLngLat(east, north),
+                    Point.fromLngLat(east, south),
+                    Point.fromLngLat(west, south),
+                    Point.fromLngLat(west, north)
+                )
             )
-        )
-        val areaGeometry = Polygon.fromLngLats(coordinates)
+            val areaGeometry = Polygon.fromLngLats(coordinates)
 
-        val tilesetDescriptor = offlineManager.createTilesetDescriptor(
-            TilesetDescriptorOptions.Builder()
-                .styleURI(NavigationStyles.NAVIGATION_DAY_STYLE)
-                .minZoom(0)
-                .maxZoom(15)
+            val tilesetDescriptor = offlineManager.createTilesetDescriptor(
+                TilesetDescriptorOptions.Builder()
+                    .styleURI(NavigationStyles.NAVIGATION_DAY_STYLE)
+                    .minZoom(0)
+                    .maxZoom(13)
+                    .build()
+            )
+
+            val tileRegionLoadOptions = TileRegionLoadOptions.Builder()
+                .geometry(areaGeometry)
+                .descriptors(listOf(tilesetDescriptor))
+                .acceptExpired(true)
                 .build()
-        )
 
-
-        val tileRegionLoadOptions = TileRegionLoadOptions.Builder()
-            .geometry(areaGeometry)
-            .descriptors(listOf(tilesetDescriptor))
-            .acceptExpired(true)
-            .build()
-
-        tileStore.loadTileRegion(
-            region,
-            tileRegionLoadOptions,
-            { progress ->
-                val percent = progress.completedResourceCount.toDouble() / progress.requiredResourceCount * 100
-                sendEvent("offlineDownloadProgress", mapOf("percent" to percent))
-            },
-            { expected ->
+            tileStore.loadTileRegion(
+                region,
+                tileRegionLoadOptions,
+                { progress ->
+                    val total = progress.requiredResourceCount.toDouble()
+                    val percent = if (total > 0) (progress.completedResourceCount / total) * 100 else 0.0
+                    sendEvent("offlineDownloadProgress", mapOf("id" to region, "percent" to percent))
+                },
+                { expected ->
                     if (expected.isError) {
                         Log.e(TAG, "Erro no download de $region: ${expected.error}")
                         sendEvent("error", mapOf("message" to expected.error.toString()))
@@ -493,9 +545,9 @@ class MapboxPlatformView(
                         Log.d(TAG, "Região $region baixada com sucesso!")
                         sendEvent("offlineDownloadComplete", mapOf("id" to region))
                     }
-            }
-
-        )
+                }
+            )
+        }
     }
     @RequiresPermission(allOf = [Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION])
     private fun initializeNavigationComponents() {
@@ -522,7 +574,7 @@ class MapboxPlatformView(
             followingFrameOptions.apply {
                 defaultPitch = 45.0
                 minZoom = 12.0
-                maxZoom = 18.0
+                maxZoom = 15.0
                 focalPoint = FollowingFrameOptions.FocalPoint(0.5, 1.0)
                 pitchNearManeuvers.enabled = true
             }
@@ -572,89 +624,54 @@ class MapboxPlatformView(
         Log.d(TAG, "Componentes de navegação inicializados.")
     }
 
-
     private fun isValidCoordinate(value: Double, isLatitude: Boolean): Boolean {
         return if (isLatitude) value in -90.0..90.0 else value in -180.0..180.0
     }
 
     @SuppressLint("MissingPermission")
-    fun createRoute(origin: List<Double>?, destination: List<Double>?, waypoints: List<List<Double>>?, isDestinationChange: Boolean = false) {
-        val mapView = _mapView ?: return
-        if (mapboxNavigation == null) {
-            Log.e(TAG, "MapboxNavigation não está inicializado.")
-            sendEvent("error", mapOf("message" to "MapboxNavigation não está inicializado."))
-            return
-        }
+    fun createRoute(origin: List<Double>?, destination: List<Double>?, waypointsList: List<List<Double>>?, isDestinationChange: Boolean = false) {
+        if (mapboxNavigation == null || origin == null || destination == null) return
 
-        if (origin == null || destination == null || origin.size != 2 || destination.size != 2) {
-            Log.e(TAG, "Coordenadas de origem ou destino inválidas: origin=$origin, destination=$destination")
-            sendEvent("error", mapOf("message" to "Coordenadas de origem ou destino inválidas. Devem conter exatamente [latitude, longitude]."))
-            return
-        }
-        val originLat = origin[0]
-        val originLng = origin[1]
-        val destLat = destination[0]
-        val destLng = destination[1]
-
-        if (!isValidCoordinate(originLat, true) || !isValidCoordinate(originLng, false) ||
-            !isValidCoordinate(destLat, true) || !isValidCoordinate(destLng, false)) {
-            Log.e(TAG, "Coordenadas fora do intervalo válido: origin=[$originLat, $originLng], destination=[$destLat, $destLng]")
-            sendEvent("error", mapOf("message" to "Coordenadas fora do intervalo válido. Latitude: -90 a 90, Longitude: -180 a 180."))
-            return
-        }
         val originPoint = if (navigationLocationProvider.lastLocation != null) {
-            Point.fromLngLat(
-                navigationLocationProvider.lastLocation!!.longitude,
-                navigationLocationProvider.lastLocation!!.latitude
-            )
+            Point.fromLngLat(navigationLocationProvider.lastLocation!!.longitude, navigationLocationProvider.lastLocation!!.latitude)
         } else {
-            Log.w(TAG, "GPS lastLocation está null, a usar origin do Flutter como fallback.")
             Point.fromLngLat(origin[1], origin[0])
         }
-        val destinationPoint = Point.fromLngLat(destLng, destLat)
-        mapboxNavigation?.setNavigationRoutes(emptyList())
-        mapboxNavigation?.requestRoutes(
-            RouteOptions.builder()
-                .applyDefaultNavigationOptions()
-                .applyLanguageAndVoiceUnitOptions(context)
-                .coordinatesList(listOf(originPoint, destinationPoint))
-                .profile(DirectionsCriteria.PROFILE_DRIVING)
-                .steps(true)
-                .annotationsList(listOf(DirectionsCriteria.ANNOTATION_DISTANCE, DirectionsCriteria.ANNOTATION_DURATION))
-                .voiceInstructions(true)
-                .alternatives(false)
-                .language("pt")
-                .enableRefresh(false)
-                .build(),
-            object : NavigationRouterCallback {
-                override fun onCanceled(routeOptions: RouteOptions, routerOrigin: String) {
-                    Log.d(TAG, "Cálculo de rota cancelado.")
-                    sendEvent("routeCanceled", null)
-                }
 
-                override fun onFailure(reasons: List<RouterFailure>, routeOptions: RouteOptions) {
-                    val message = reasons.joinToString(", ") { it.message }
-                    Log.e(TAG, "Falha no cálculo de rota: $message")
-                    sendEvent("error", mapOf("type" to "routeCalculationFailure", "message" to message))
-                }
+        val destinationPoint = Point.fromLngLat(destination[1], destination[0])
+        val waypoints = waypointsList?.map { Point.fromLngLat(it[1], it[0]) }
 
-                override fun onRoutesReady(routes: List<NavigationRoute>, routerOrigin: String) {
-                    if (routes.isNotEmpty()) {
-                        mapboxNavigation?.setNavigationRoutes(routes)
-                        navigationCamera?.requestNavigationCameraToOverview()
-                        sendEvent("routeCreated", mapOf(
-                            "routeId" to routes.first().directionsRoute.hashCode().toString(),
-                            "routeCount" to routes.size,
-                            "distance" to routes.first().directionsRoute.distance(),
-                            "duration" to routes.first().directionsRoute.duration()
-                        ))
-                    } else {
-                        Log.d(TAG, "Nenhuma rota encontrada.")
-                        sendEvent("routeCreated", mapOf("routeCount" to 0))
-                    }
-                }
+        val options = buildRouteOptions(originPoint, destinationPoint, waypoints)
+
+        mapboxNavigation?.requestRoutes(options, object : NavigationRouterCallback {
+            override fun onCanceled(routeOptions: RouteOptions, routerOrigin: String) {
+                sendEvent("routeCanceled", null)
             }
-        )
+            override fun onFailure(reasons: List<RouterFailure>, routeOptions: RouteOptions) {
+                val message = reasons.joinToString(", ") { it.message }
+                sendEvent("error", mapOf("type" to "routeCalculationFailure", "message" to message))
+            }
+
+            override fun onRoutesReady(routes: List<NavigationRoute>, routerOrigin: String) {
+                val validRoutes = routes.filter { !isRouteInForbiddenZone(it.directionsRoute) }
+                if (routes.isNotEmpty()) {
+                    mapboxNavigation?.setNavigationRoutes(routes)
+                    navigationCamera?.requestNavigationCameraToOverview()
+                    sendEvent("routeCreated", mapOf(
+                        "routeId" to routes.first().directionsRoute.hashCode().toString(),
+                        "routeCount" to routes.size,
+                        "distance" to routes.first().directionsRoute.distance(),
+                        "duration" to routes.first().directionsRoute.duration()
+                    ))
+                    if(isDestinationChange){
+                        setRouteAndStartNavigation()
+                    }
+                } else {
+                    sendEvent("routeCreated", mapOf("routeCount" to 0))
+                }
+
+            }
+        })
     }
 
     @SuppressLint("MissingPermission")
@@ -689,90 +706,18 @@ class MapboxPlatformView(
         }
     }
 
+
     @RequiresPermission(allOf = [Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION])
-    fun changeDestination(origin: List<Double>?,newDestination: List<Double>) {
-        if (mapboxNavigation == null) {
-            Log.e(TAG, "MapboxNavigation não está inicializado para mudar destino.")
-            sendEvent("error", mapOf("message" to "MapboxNavigation not initialized for changing destination."))
-            return
-        }
+    fun changeDestination(origin: List<Double>?, newDestination: List<Double>) {
+        if (mapboxNavigation == null) return
 
-        if (newDestination.size != 2) {
-            Log.e(TAG, "Coordenadas do novo destino inválidas: $newDestination")
-            sendEvent("error", mapOf("message" to "Coordenadas do novo destino inválidas."))
-            return
-        }
+        Log.d(TAG, "Alterando destino para: $newDestination")
+        createRoute(origin, newDestination, null, true)
 
-        val newDestLat = newDestination[0]
-        val newDestLng = newDestination[1]
-
-
-        if (!isValidCoordinate(newDestLat, true) || !isValidCoordinate(newDestLng, false)) {
-            Log.e(TAG, "Novo destino fora do intervalo válido: [$newDestLat, $newDestLng]")
-            sendEvent("error", mapOf("message" to "Novo destino fora do intervalo válido. Latitude: -90 a 90, Longitude: -180 a 180."))
-            return
-        }
-        val originPoint = if (origin?.size == 2) {
-            origin.let { Point.fromLngLat(it[1], it[0]) }
-        } else {
-            Point.fromLngLat(
-                navigationLocationProvider.lastLocation!!.longitude,
-                navigationLocationProvider.lastLocation!!.latitude
-            )
-        }
-
-        val destinationPoint = Point.fromLngLat(newDestLng, newDestLat)
-        Log.d(TAG, "Destino alterado, recalculando rota.")
-        if (originPoint != null) {
-            mapboxNavigation?.requestRoutes(
-                RouteOptions.builder()
-                    .applyDefaultNavigationOptions()
-                    .applyLanguageAndVoiceUnitOptions(context)
-                    .coordinatesList(listOf(originPoint, destinationPoint))
-                    .profile(DirectionsCriteria.PROFILE_DRIVING)
-                    .steps(true)
-                    .annotationsList(listOf(DirectionsCriteria.ANNOTATION_DISTANCE, DirectionsCriteria.ANNOTATION_DURATION))
-                    .voiceInstructions(true)
-                    .alternatives(false)
-                    .language("pt")
-                    .enableRefresh(false)
-                    .build(),
-                object : NavigationRouterCallback {
-                    override fun onCanceled(routeOptions: RouteOptions, routerOrigin: String) {
-                        Log.d(TAG, "Cálculo de rota cancelado.")
-                        sendEvent("routeCanceled", null)
-                    }
-
-                    override fun onFailure(reasons: List<RouterFailure>, routeOptions: RouteOptions) {
-                        val message = reasons.joinToString(", ") { it.message }
-                        Log.e(TAG, "Falha no cálculo de rota: $message")
-                        sendEvent("error", mapOf("type" to "routeCalculationFailure", "message" to message))
-                    }
-
-                    @RequiresPermission(allOf = [Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION])
-                    override fun onRoutesReady(routes: List<NavigationRoute>, routerOrigin: String) {
-                        if (routes.isNotEmpty()) {
-                            mapboxNavigation?.setNavigationRoutes(routes)
-                            setRouteAndStartNavigation()
-                            sendEvent("routeCreated", mapOf(
-                                "routeId" to routes.first().directionsRoute.hashCode().toString(),
-                                "routeCount" to routes.size,
-                                "distance" to routes.first().directionsRoute.distance(),
-                                "duration" to routes.first().directionsRoute.duration()
-                            ))
-                        } else {
-                            Log.d(TAG, "Nenhuma rota encontrada.")
-                            sendEvent("routeCreated", mapOf("routeCount" to 0))
-                        }
-                    }
-                }
-            )
-            sendEvent("destinationChanged", mapOf("newDestinationLat" to newDestLat, "newDestinationLng" to newDestLng))
-            Log.d(TAG, "Destino alterado, recalculando rota.")
-        } else {
-            Log.e(TAG, "Não é possível mudar o destino, localização atual desconhecida.")
-            sendEvent("error", mapOf("message" to "Current location unknown to change destination."))
-        }
+        sendEvent("destinationChanged", mapOf(
+            "newDestinationLat" to newDestination[0],
+            "newDestinationLng" to newDestination[1]
+        ))
     }
 
     fun cancelNavigation() {
@@ -798,6 +743,53 @@ class MapboxPlatformView(
         cancelNavigation()
     }
 
+    private fun buildRouteOptions(origin: Point, destination: Point, waypoints: List<Point>?): RouteOptions {
+        val coordinates = mutableListOf<Point>()
+        coordinates.add(origin)
+        waypoints?.let { coordinates.addAll(it) }
+        coordinates.add(destination)
+
+        val optionsBuilder = RouteOptions.builder()
+            .applyDefaultNavigationOptions()
+            .coordinatesList(coordinates)
+            .profile(routeProfile)
+            .language(routeLanguage)
+            .voiceUnits(routeUnits)
+            .geometries(routeGeometryPrecision)
+            .steps(true)
+            .voiceInstructions(true)
+            .alternatives(false)
+            .enableRefresh(false)
+
+        if (isTruck) {
+            val exclusions = mutableListOf<String>()
+            exclusions.add(DirectionsCriteria.EXCLUDE_TOLL)
+            exclusions.add(DirectionsCriteria.EXCLUDE_FERRY)
+            exclusions.add(DirectionsCriteria.EXCLUDE_UNPAVED)
+            exclusions.addAll(avoidList)
+
+            optionsBuilder.excludeList(exclusions)
+            maxHeight?.let { optionsBuilder.maxHeight(it) }
+            maxWeight?.let { optionsBuilder.maxWeight(it) }
+            maxWidth?.let { optionsBuilder.maxWidth(it) }
+        }
+
+        return optionsBuilder.build()
+    }
+
+    private fun isRouteInForbiddenZone(route: DirectionsRoute): Boolean {
+        val geometry = route.geometry() ?: return false
+        val routeLine = LineString.fromPolyline(geometry, 6)
+        for (point in routeLine.coordinates()) {
+            for (zone in forbiddenZones) {
+                if (TurfJoins.inside(point, zone)) {
+                    return true
+                }
+            }
+        }
+        return false
+    }
+
     @RequiresPermission(allOf = [Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION])
     private fun setRouteAndStartNavigation() {
         val currentRoutes = routeLineApi.getNavigationRoutes()
@@ -805,10 +797,10 @@ class MapboxPlatformView(
             mapboxNavigation?.setNavigationRoutes(currentRoutes)
             navigationCamera?.requestNavigationCameraToFollowing()
             sendEvent("navigationStarted", null)
+            cacheRouteData(currentRoutes.first())
         }
         sendEvent("navigationStarted", null)
     }
-
 
     private fun sendEvent(type: String, data: Map<String, Any?>?) {
         val payload = data?.toMutableMap() ?: mutableMapOf()
