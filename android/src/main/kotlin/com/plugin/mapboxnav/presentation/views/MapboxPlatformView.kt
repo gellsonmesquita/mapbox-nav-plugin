@@ -382,8 +382,8 @@ class MapboxPlatformView(
             val tilesetDescriptor = offlineManager.createTilesetDescriptor(
                 TilesetDescriptorOptions.Builder()
                     .styleURI(NavigationStyles.NAVIGATION_DAY_STYLE)
-                    .minZoom(0)
-                    .maxZoom(13)
+                    .minZoom(13)
+                    .maxZoom(20)
                     .build()
             )
 
@@ -426,7 +426,7 @@ class MapboxPlatformView(
         _mapView?.mapboxMap?.loadStyle(NavigationStyles.NAVIGATION_DAY_STYLE) { style ->
             _mapView?.mapboxMap?.setCamera(
                 CameraOptions.Builder()
-                    .zoom(15.0)
+                    .zoom(18.0)
                     .build()
             )
             _mapView?.logo?.enabled = false
@@ -518,8 +518,8 @@ class MapboxPlatformView(
             val tilesetDescriptor = offlineManager.createTilesetDescriptor(
                 TilesetDescriptorOptions.Builder()
                     .styleURI(NavigationStyles.NAVIGATION_DAY_STYLE)
-                    .minZoom(0)
-                    .maxZoom(13)
+                    .minZoom(13)
+                    .maxZoom(20)
                     .build()
             )
 
@@ -573,13 +573,13 @@ class MapboxPlatformView(
         viewportDataSource.options.apply {
             followingFrameOptions.apply {
                 defaultPitch = 45.0
-                minZoom = 12.0
-                maxZoom = 15.0
+                minZoom = 13.0
+                maxZoom = 20.0
                 focalPoint = FollowingFrameOptions.FocalPoint(0.5, 1.0)
                 pitchNearManeuvers.enabled = true
             }
             overviewFrameOptions.apply {
-                maxZoom = 15.0
+                maxZoom = 20.0
                 pitchUpdatesAllowed = true
             }
         }
@@ -665,6 +665,7 @@ class MapboxPlatformView(
                     ))
                     if(isDestinationChange){
                         setRouteAndStartNavigation()
+                        navigationCamera?.requestNavigationCameraToFollowing()
                     }
                 } else {
                     sendEvent("routeCreated", mapOf("routeCount" to 0))
