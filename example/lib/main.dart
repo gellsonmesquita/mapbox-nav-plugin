@@ -3,6 +3,7 @@ import 'package:mapboxnav/mapboxnav.dart';
 import 'dart:async';
 
 import 'package:permission_handler/permission_handler.dart';
+import 'package:mapboxnav/src/data/performance_policy.dart';
 
 void main() {
   runApp(const MyApp());
@@ -31,18 +32,24 @@ class NavigationScreen extends StatefulWidget {
 }
 
 class _NavigationScreenState extends State<NavigationScreen> {
-  MapboxNavigationController? _controller; // Agora é anulável, pois é inicializado após a criação da view
-  StreamSubscription? _eventSubscription; // Para gerenciar a subscrição de eventos
+  MapboxNavigationController? _controller;
+  StreamSubscription? _eventSubscription; 
 
   String _navigationStatus = 'Aguardando inicialização da navegação...';
   String _currentInstruction = 'Nenhuma instrução.';
   String _eta = 'Calculando...';
   String _distanceRemaining = 'Calculando...';
+  String _dataSaverMode = 'OFF';
+  String _infoMessage = '';
+
+  PerformancePolicy? _customPolicy;
+  String _downloadStatus = '';
+  bool _isDownloading = false;
 
   final List<double> _origin = [-8.814655, 13.230176]; // Banco Nacional de Angola (BNA), Rua 1º de Maio, Luanda
   final List<double> _destination = [-8.811000, 13.234000]; // Banco Angolano de Investimentos (BAI), Edifício Escom, Kinaxixi, Luanda
   final List<double> _newDestination = [-8.823000, 13.242000]; // Banco Millennium Atlântico, Cidade Financeira, Talatona, Luanda
-  bool _permissionsGranted = false; // Para rastrear o status das permissões
+
   @override
   void initState() {
     super.initState();
@@ -59,14 +66,8 @@ class _NavigationScreenState extends State<NavigationScreen> {
     }
 
     if (status.isGranted) {
-      setState(() {
-        _permissionsGranted = true;
-      });
       print('Permissão de localização concedida!');
     } else {
-      setState(() {
-        _permissionsGranted = false;
-      });
       print('Permissão de localização negada ou permanentemente negada.');
     }
   }
@@ -85,6 +86,7 @@ class _NavigationScreenState extends State<NavigationScreen> {
       _navigationStatus = 'MapboxNavigationView inicializado.';
     });
     _eventSubscription = _controller!.events.listen(_handleNavigationEvent);
+    _controller!.setPerformancePolicy(PerformancePolicy.defaults());
   }
 
   void _handleNavigationEvent(MapboxNavigationEvent event) {
@@ -137,11 +139,96 @@ class _NavigationScreenState extends State<NavigationScreen> {
         case 'error':
           _navigationStatus = 'Erro: ${event['message']}';
           break;
+        case 'offlineDownloadBlocked':
+          _infoMessage = 'Download offline bloqueado: só é permitido em Wi-Fi no modo economia de dados.';
+          _isDownloading = false;
+          _downloadStatus = 'Bloqueado (apenas Wi-Fi)';
+          break;
+        case 'offlineDownloadComplete':
+          if (event['status'] == 'already_exists') {
+            _infoMessage = 'A região já está baixada. Nenhum dado extra foi consumido.';
+            _downloadStatus = 'Região já baixada';
+          } else {
+            _infoMessage = 'Download offline concluído com sucesso!';
+            _downloadStatus = 'Download concluído';
+          }
+          _isDownloading = false;
+          break;
+        case 'tripProgressUpdate':
+        case 'maneuverUpdate':
+          if (_dataSaverMode == 'AGRESSIVE') {
+            _infoMessage = 'Eventos de navegação reduzidos para economizar dados.';
+          } else {
+            _infoMessage = '';
+          }
+          break;
         default:
-          _navigationStatus = 'Evento genérico: ${event['type']}';
+          _infoMessage = '';
+          _isDownloading = false;
           break;
       }
     });
+  }
+
+  // Exemplo de PerformancePolicy customizada
+  PerformancePolicy _buildCustomPolicy() {
+    return PerformancePolicy(
+      routeRequestCooldownMs: 8000,
+      locationEventMinIntervalMs: 2000,
+      tripProgressEventMinIntervalMs: 2000,
+      offlineProgressEventMinIntervalMs: 2000,
+      skipDuplicateRouteRequests: true,
+      locationGranularity: LocationGranularity.balanced,
+      reduceFlutterEvents: true,
+      enableRouteCache: true,
+      enableTelemetry: false,
+      dataSaverMode: DataSaverMode.balanced,
+      allowOfflineDownloadOnCellular: false,
+      forceOfflineRedownload: false,
+    );
+  }
+
+  void _setDataSaverMode(String mode) async {
+    if (_controller != null) {
+      PerformancePolicy policy;
+      switch (mode) {
+        case 'OFF':
+          policy = PerformancePolicy.off();
+          break;
+        case 'BALANCED':
+          policy = PerformancePolicy.balanced();
+          break;
+        case 'AGGRESSIVE':
+          policy = PerformancePolicy.aggressive();
+          break;
+        case 'CUSTOM':
+          _customPolicy ??= _buildCustomPolicy();
+          policy = _customPolicy!;
+          break;
+        default:
+          policy = PerformancePolicy.defaults();
+      }
+      await _controller!.setPerformancePolicy(policy);
+      await _controller!.setDataSaverMode(mode);
+      setState(() {
+        _dataSaverMode = mode;
+      });
+    }
+  }
+
+  void _downloadOfflineRegion() async {
+    if (_controller == null || _isDownloading) return;
+    setState(() {
+      _isDownloading = true;
+      _downloadStatus = 'Baixando...';
+    });
+    await _controller!.downloadRegion(
+      region: 'LuandaCentro',
+      north: -8.810,
+      east: 13.235,
+      south: -8.820,
+      west: 13.225,
+    );
   }
 
   @override
@@ -179,6 +266,69 @@ class _NavigationScreenState extends State<NavigationScreen> {
                           const SizedBox(height: 8),
                           Text('Instrução: $_currentInstruction', style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
                           Text('ETA: $_eta, Distância: $_distanceRemaining', style: const TextStyle(fontSize: 16)),
+                          const SizedBox(height: 8),
+                          Text('Modo de economia de dados: $_dataSaverMode', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+                          if (_downloadStatus.isNotEmpty)
+                            Padding(
+                              padding: const EdgeInsets.symmetric(vertical: 4.0),
+                              child: Text('Status do download offline: $_downloadStatus', style: TextStyle(color: Colors.green[800], fontWeight: FontWeight.bold)),
+                            ),
+                          Padding(
+                            padding: const EdgeInsets.symmetric(vertical: 8.0),
+                            child: Text(
+                              _infoMessage,
+                              style: TextStyle(color: Colors.orange[800], fontWeight: FontWeight.bold),
+                            ),
+                          ),
+                          Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 8.0, vertical: 4.0),
+                            child: Text(
+                              'Dicas de economia de dados:\n'
+                              '- Use o modo AGRESSIVE para máxima economia: menos eventos, menos atualizações.\n'
+                              '- O modo BALANCED reduz eventos, mas mantém boa experiência.\n'
+                              '- Downloads offline só baixam uma vez por região.\n'
+                              '\n'
+                              'Exemplo prático:\n'
+                              '1. Selecione AGRESSIVE e navegue: veja menos atualizações e menos consumo.\n'
+                              '2. Tente baixar a mesma região duas vezes: só baixa uma vez.\n'
+                              '3. Volte para OFF para experiência completa, sem restrições.',
+                              style: TextStyle(color: Colors.blueGrey[700], fontSize: 13),
+                            ),
+                          ),
+                          Padding(
+                            padding: const EdgeInsets.symmetric(vertical: 4.0),
+                            child: Row(
+                              children: [
+                                ElevatedButton(
+                                  onPressed: _isDownloading ? null : _downloadOfflineRegion,
+                                  child: const Text('Baixar região offline'),
+                                ),
+                                const SizedBox(width: 8),
+                                ElevatedButton(
+                                  onPressed: () => _setDataSaverMode('CUSTOM'),
+                                  child: const Text('Custom Policy'),
+                                ),
+                              ],
+                            ),
+                          ),
+                          Row(
+                            children: [
+                              ElevatedButton(
+                                onPressed: () => _setDataSaverMode('OFF'),
+                                child: const Text('OFF'),
+                              ),
+                              const SizedBox(width: 8),
+                              ElevatedButton(
+                                onPressed: () => _setDataSaverMode('BALANCED'),
+                                child: const Text('BALANCED'),
+                              ),
+                              const SizedBox(width: 8),
+                              ElevatedButton(
+                                onPressed: () => _setDataSaverMode('AGGRESSIVE'),
+                                child: const Text('AGGRESSIVE'),
+                              ),
+                            ],
+                          ),
                           Wrap(
                             spacing: 8.0,
                             runSpacing: 4.0,

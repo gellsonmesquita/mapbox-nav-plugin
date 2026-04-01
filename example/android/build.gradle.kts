@@ -3,6 +3,10 @@ allprojects {
         google()
         mavenCentral()
     }
+
+    configurations.configureEach {
+        exclude(group = "com.mapbox.mapboxsdk", module = "mapbox-android-core")
+    }
 }
 
 val newBuildDir: Directory = rootProject.layout.buildDirectory.dir("../../build").get()

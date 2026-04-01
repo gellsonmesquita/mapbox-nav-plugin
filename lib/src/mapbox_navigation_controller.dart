@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:mapboxnav/src/data/mapbox_config.dart';
+import 'package:mapboxnav/src/data/performance_policy.dart';
 
 typedef MapboxNavigationEvent = Map<String, dynamic>;
 
@@ -175,6 +176,14 @@ class MapboxNavigationController extends ChangeNotifier {
     await _methodChannel.invokeMethod('stopNavigation', {
       'viewId': _viewId,
     });
+  }
+
+  Future<void> setPerformancePolicy(PerformancePolicy policy) async {
+    await _methodChannel.invokeMethod('setPerformancePolicy', policy.toMap());
+  }
+
+  Future<void> setDataSaverMode(String mode) async {
+    await _methodChannel.invokeMethod('setDataSaverMode', {'mode': mode});
   }
 
   @override

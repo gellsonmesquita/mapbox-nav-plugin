@@ -1,6 +1,7 @@
 import 'package:plugin_platform_interface/plugin_platform_interface.dart';
 
 import 'mapboxnav_method_channel.dart';
+import 'src/data/performance_policy.dart';
 
 
 abstract class MapboxNavPlatform extends PlatformInterface {
@@ -20,5 +21,9 @@ abstract class MapboxNavPlatform extends PlatformInterface {
 
   Future<String?> getPlatformVersion() {
     throw UnimplementedError('platformVersion() has not been implementado.');
+  }
+
+  Future<void> setPerformancePolicy(PerformancePolicy policy) {
+    throw UnimplementedError('setPerformancePolicy() has not been implementado.');
   }
 }

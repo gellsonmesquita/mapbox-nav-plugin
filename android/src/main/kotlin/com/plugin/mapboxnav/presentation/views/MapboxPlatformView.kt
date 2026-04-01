@@ -10,8 +10,6 @@ import android.widget.FrameLayout
 import androidx.annotation.RequiresPermission
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.LifecycleOwner
-import androidx.lifecycle.LifecycleRegistry
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.setViewTreeLifecycleOwner
 import com.mapbox.api.directions.v5.DirectionsCriteria
@@ -44,7 +42,6 @@ import com.mapbox.maps.plugin.locationcomponent.location
 import com.mapbox.maps.plugin.logo.logo
 import com.mapbox.navigation.base.ExperimentalPreviewMapboxNavigationAPI
 import com.mapbox.navigation.base.extensions.applyDefaultNavigationOptions
-import com.mapbox.navigation.base.extensions.applyLanguageAndVoiceUnitOptions
 import com.mapbox.navigation.base.formatter.DistanceFormatterOptions
 import com.mapbox.navigation.base.options.NavigationOptions
 import com.mapbox.navigation.base.route.NavigationRoute
@@ -54,6 +51,7 @@ import com.mapbox.navigation.core.MapboxNavigation
 import com.mapbox.navigation.core.directions.session.RoutesObserver
 import com.mapbox.navigation.core.formatter.MapboxDistanceFormatter
 import com.mapbox.navigation.core.lifecycle.MapboxNavigationApp
+import com.mapbox.navigation.core.reroute.RerouteOptionsAdapter
 import com.mapbox.navigation.core.trip.session.LocationMatcherResult
 import com.mapbox.navigation.core.trip.session.LocationObserver
 import com.mapbox.navigation.core.trip.session.RouteProgressObserver
@@ -84,7 +82,13 @@ import com.mapbox.navigation.voice.model.SpeechAnnouncement
 import com.mapbox.navigation.voice.model.SpeechError
 import com.mapbox.navigation.voice.model.SpeechValue
 import com.mapbox.navigation.voice.model.SpeechVolume
+import com.plugin.mapboxnav.domain.models.DataSaverMode
+import com.plugin.mapboxnav.domain.models.NavigationBehaviorPolicy
+import com.plugin.mapboxnav.domain.models.PerformancePolicy
+import com.plugin.mapboxnav.domain.utils.EventRateLimiter
+import com.plugin.mapboxnav.domain.utils.RouteRequestGate
 import com.plugin.mapboxnav.infrastructure.registry.MapboxViewManager
+import com.plugin.mapboxnav.presentation.lifecycle.LifecycleHelper
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.plugins.activity.ActivityPluginBinding
 import io.flutter.plugin.common.BinaryMessenger
@@ -96,11 +100,9 @@ import kotlinx.coroutines.launch
 import org.json.JSONObject
 import java.util.Locale
 import com.mapbox.maps.extension.style.layers.properties.generated.Visibility
-import com.mapbox.navigation.base.options.IncidentsOptions
-import com.mapbox.navigation.base.route.RouteRefreshOptions
 import com.mapbox.turf.TurfJoins
 
-
+@SuppressLint("MissingPermission")
 @OptIn(ExperimentalPreviewMapboxNavigationAPI::class)
 class MapboxPlatformView(
     private val context: Context,
@@ -126,7 +128,9 @@ class MapboxPlatformView(
     private var routeProfile = DirectionsCriteria.PROFILE_DRIVING
     private var routeLanguage = "pt"
     private var routeUnits = DirectionsCriteria.METRIC
-    private var routeGeometryPrecision = DirectionsCriteria.GEOMETRY_POLYLINE6
+    private var routeGeometryPrecision = DirectionsCriteria.GEOMETRY_POLYLINE
+    private var allowAlternatives = false
+    private var enableRouteRefresh = false
     private var avoidList = mutableListOf<String>()
     private var forbiddenZones = mutableListOf<Polygon>()
 
@@ -143,6 +147,17 @@ class MapboxPlatformView(
     private lateinit var voiceInstructionsPlayer: MapboxVoiceInstructionsPlayer
     private val navigationLocationProvider = NavigationLocationProvider()
     private var currentDirectionsRoute: DirectionsRoute? = null
+    private var performancePolicy = PerformancePolicy()
+    private var dataSaverMode = DataSaverMode.OFF
+    private var isWifiConnected: Boolean = true
+    private var behaviorPolicy = NavigationBehaviorPolicy()
+    private val locationEventLimiter = EventRateLimiter()
+    private val tripProgressEventLimiter = EventRateLimiter()
+    private val routeRequestGate = RouteRequestGate()
+    private val offlineProgressLimiterByRegion = mutableMapOf<String, EventRateLimiter>()
+    private val lastOfflineProgressPercentByRegion = mutableMapOf<String, Double>()
+    private var pendingStartNavigation = false
+    private var isTripSessionActive = false
     private var isVoiceInstructionsMuted = false
         set(value) {
             field = value
@@ -150,6 +165,8 @@ class MapboxPlatformView(
             sendEvent("voiceInstructionsMuted", mapOf("muted" to value))
         }
     private var lifecycleHelper: LifecycleHelper? = null
+
+    private var locationUpdateIntervalMs: Long = 1000L
 
     private val tileStore: TileStore by lazy { TileStore.create() }
     private val offlineManager: OfflineManager by lazy { OfflineManager() }
@@ -231,22 +248,33 @@ class MapboxPlatformView(
         override fun onNewRawLocation(rawLocation: com.mapbox.common.location.Location) {}
 
         override fun onNewLocationMatcherResult(locationMatcherResult: LocationMatcherResult) {
-            val mapView = _mapView ?: return
+            _mapView ?: return
             val enhancedLocation = locationMatcherResult.enhancedLocation
             navigationLocationProvider.changePosition(
                 location = enhancedLocation,
                 keyPoints = locationMatcherResult.keyPoints,
             )
-            sendEvent("locationUpdate", mapOf(
-                "latitude" to enhancedLocation.latitude,
-                "longitude" to enhancedLocation.longitude,
-                "bearing" to enhancedLocation.bearing,
-                "accuracy" to enhancedLocation.bearingAccuracy,
-                "speed" to enhancedLocation.speed
-            ))
+
+            val activeNavigation = currentDirectionsRoute != null
+            val baseIntervalMs = maxOf(performancePolicy.locationEventMinIntervalMs, locationUpdateIntervalMs)
+            val effectiveIntervalMs = if (activeNavigation) baseIntervalMs else (baseIntervalMs * 3).coerceAtMost(15_000L)
+
+            if (dataSaverMode == DataSaverMode.AGGRESSIVE && !activeNavigation) {
+                return
+            }
+
+            if (locationEventLimiter.shouldEmit(effectiveIntervalMs)) {
+                sendEvent("locationUpdate", mapOf(
+                    "latitude" to enhancedLocation.latitude,
+                    "longitude" to enhancedLocation.longitude,
+                    "bearing" to enhancedLocation.bearing,
+                    "accuracy" to enhancedLocation.bearingAccuracy,
+                    "speed" to enhancedLocation.speed
+                ))
+            }
             viewportDataSource.onLocationChanged(enhancedLocation)
             viewportDataSource.evaluate()
-            if (!firstLocationUpdateReceived) {
+            if (!firstLocationUpdateReceived && behaviorPolicy.autoFollowOnFirstLocation) {
                 firstLocationUpdateReceived = true
                 navigationCamera?.requestNavigationCameraToFollowing()
             }
@@ -281,13 +309,15 @@ class MapboxPlatformView(
             }
         )
 
-        val tripProgress = tripProgressApi.getTripProgress(routeProgress)
-        sendEvent("tripProgressUpdate", mapOf(
-            "distanceRemaining" to tripProgress.distanceRemaining,
-            "timeRemaining" to tripProgress.totalTimeRemaining,
-            "percentRouteTraveled" to tripProgress.percentRouteTraveled,
-            "estimatedTimeToArrival" to tripProgress.estimatedTimeToArrival
-        ))
+        if (tripProgressEventLimiter.shouldEmit(performancePolicy.tripProgressEventMinIntervalMs)) {
+            val tripProgress = tripProgressApi.getTripProgress(routeProgress)
+            sendEvent("tripProgressUpdate", mapOf(
+                "distanceRemaining" to tripProgress.distanceRemaining,
+                "timeRemaining" to tripProgress.totalTimeRemaining,
+                "percentRouteTraveled" to tripProgress.percentRouteTraveled,
+                "estimatedTimeToArrival" to tripProgress.estimatedTimeToArrival
+            ))
+        }
     }
 
     private val voiceInstructionsObserver = VoiceInstructionsObserver { voiceInstructions ->
@@ -310,6 +340,9 @@ class MapboxPlatformView(
     }
 
     init {
+        val connectivityManager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? android.net.ConnectivityManager
+        val networkInfo = connectivityManager?.activeNetworkInfo
+        isWifiConnected = networkInfo?.type == android.net.ConnectivityManager.TYPE_WIFI
         eventChannel = EventChannel(messenger, "$eventChannelBaseName/$viewId")
         eventChannel.setStreamHandler(this)
         methodChannel = MethodChannel(messenger, "$eventChannelBaseName/$viewId/methods")
@@ -320,6 +353,15 @@ class MapboxPlatformView(
                 "toggleVoiceInstructions" -> {
                     isVoiceInstructionsMuted = !isVoiceInstructionsMuted
                     result.success(null)
+                }
+                "setVoiceInstructionsMuted" -> {
+                    val muted = call.argument<Boolean>("muted")
+                    if (muted == null) {
+                        result.error("INVALID_ARGS", "Argument 'muted' is required", null)
+                    } else {
+                        isVoiceInstructionsMuted = muted
+                        result.success(null)
+                    }
                 }
                 "recenter" -> {
                     navigationCamera?.requestNavigationCameraToFollowing()
@@ -332,18 +374,47 @@ class MapboxPlatformView(
                     result.success(null)
                 }
                 "updateRouteOptions" -> {
-                    val args = call.arguments as? Map<String, Any>
+                    val args = call.arguments as? Map<*, *>
                     isTruck = args?.get("isTruck") as? Boolean ?: isTruck
                     maxHeight = (args?.get("maxHeight") as? Number)?.toDouble() ?: maxHeight
                     maxWeight = (args?.get("maxWeight") as? Number)?.toDouble() ?: maxWeight
                     routeProfile = args?.get("profile") as? String ?: routeProfile // "driving" ou "driving-traffic"
                     routeLanguage = args?.get("language") as? String ?: routeLanguage
                     routeUnits = args?.get("units") as? String ?: routeUnits // "metric" ou "imperial"
+                    allowAlternatives = args?.get("alternatives") as? Boolean ?: allowAlternatives
+                    enableRouteRefresh = args?.get("enableRefresh") as? Boolean ?: enableRouteRefresh
+                    @Suppress("UNCHECKED_CAST")
                     val flutterExclusions = args?.get("excludeList") as? List<String>
                     if (flutterExclusions != null) {
                         avoidList = flutterExclusions.toMutableList()
                     }
                     result.success(null)
+                }
+                "setPerformancePolicy" -> {
+                    @Suppress("UNCHECKED_CAST")
+                    val args = call.arguments as? Map<String, Any>
+                    setPerformancePolicy(args)
+                    result.success(null)
+                }
+                "setDataSaverMode" -> {
+                    val modeName = call.argument<String>("mode")
+                    setDataSaverMode(modeName)
+                    result.success(null)
+                }
+                "setNavigationBehavior" -> {
+                    @Suppress("UNCHECKED_CAST")
+                    val args = call.arguments as? Map<String, Any>
+                    setNavigationBehavior(args)
+                    result.success(null)
+                }
+                "setTripSessionActive" -> {
+                    val active = call.argument<Boolean>("active")
+                    if (active == null) {
+                        result.error("INVALID_ARGS", "Argument 'active' is required", null)
+                    } else {
+                        setTripSessionActive(active)
+                        result.success(null)
+                    }
                 }
                 "setForbiddenZones" -> {
                     // {"lat": double, "lng": double}
@@ -369,7 +440,83 @@ class MapboxPlatformView(
         initMapView()
     }
 
+    @RequiresPermission(allOf = [Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION])
+    private fun applyTripSessionBehavior() {
+        if (behaviorPolicy.autoStartTripSession) {
+            mapboxNavigation?.startTripSession()
+            isTripSessionActive = true
+        } else {
+            mapboxNavigation?.stopTripSession()
+            isTripSessionActive = false
+        }
+    }
+
+    fun updateVoiceInstructionsMuted(muted: Boolean) {
+        isVoiceInstructionsMuted = muted
+    }
+
+    @RequiresPermission(allOf = [Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION])
+    fun setTripSessionActive(active: Boolean) {
+        if (active) {
+            mapboxNavigation?.startTripSession()
+            isTripSessionActive = true
+        } else {
+            mapboxNavigation?.stopTripSession()
+            isTripSessionActive = false
+        }
+        sendEvent("tripSessionStateChanged", mapOf("active" to active))
+    }
+
+    fun setPerformancePolicy(args: Map<String, Any>?) {
+        performancePolicy = PerformancePolicy.fromMap(args)
+    }
+
+    fun setDataSaverMode(modeName: String?) {
+        val mode = DataSaverMode.from(modeName)
+        dataSaverMode = mode
+        when (mode) {
+            DataSaverMode.OFF -> {
+                allowAlternatives = false
+                enableRouteRefresh = false
+                performancePolicy = PerformancePolicy()
+                locationUpdateIntervalMs = 1000L
+            }
+            DataSaverMode.BALANCED -> {
+                allowAlternatives = false
+                enableRouteRefresh = false
+                performancePolicy = PerformancePolicy(
+                    routeRequestCooldownMs = 10_000,
+                    locationEventMinIntervalMs = 1_500,
+                    tripProgressEventMinIntervalMs = 2_000,
+                    offlineProgressEventMinIntervalMs = 1_500,
+                    skipDuplicateRouteRequests = true,
+                )
+                locationUpdateIntervalMs = 3000L
+            }
+            DataSaverMode.AGGRESSIVE -> {
+                allowAlternatives = false
+                enableRouteRefresh = false
+                performancePolicy = PerformancePolicy(
+                    routeRequestCooldownMs = 30_000,
+                    locationEventMinIntervalMs = 3_000,
+                    tripProgressEventMinIntervalMs = 5_000,
+                    offlineProgressEventMinIntervalMs = 3_000,
+                    skipDuplicateRouteRequests = true,
+                )
+                locationUpdateIntervalMs = 6000L
+            }
+        }
+        sendEvent("dataSaverModeChanged", mapOf("mode" to mode.name))
+    }
+
+    @RequiresPermission(allOf = [Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION])
+    fun setNavigationBehavior(args: Map<String, Any>?) {
+        behaviorPolicy = NavigationBehaviorPolicy.fromMap(args)
+        applyTripSessionBehavior()
+    }
+
     private fun cacheRouteData(navigationRoute: NavigationRoute) {
+        if (dataSaverMode != DataSaverMode.OFF) return
         val geometryStr = navigationRoute.directionsRoute.geometry() ?: return
         val routeId = "route_cache_${navigationRoute.directionsRoute.hashCode()}"
 
@@ -535,7 +682,9 @@ class MapboxPlatformView(
                 { progress ->
                     val total = progress.requiredResourceCount.toDouble()
                     val percent = if (total > 0) (progress.completedResourceCount / total) * 100 else 0.0
-                    sendEvent("offlineDownloadProgress", mapOf("id" to region, "percent" to percent))
+                    if (shouldEmitOfflineProgress(region, percent)) {
+                        sendEvent("offlineDownloadProgress", mapOf("id" to region, "percent" to percent))
+                    }
                 },
                 { expected ->
                     if (expected.isError) {
@@ -617,9 +766,28 @@ class MapboxPlatformView(
         mapboxNavigation?.registerLocationObserver(locationObserver)
         mapboxNavigation?.registerRouteProgressObserver(routeProgressObserver)
         mapboxNavigation?.registerVoiceInstructionsObserver(voiceInstructionsObserver)
+        mapboxNavigation?.setRerouteOptionsAdapter(object : RerouteOptionsAdapter {
+            override fun onRouteOptions(routeOptions: RouteOptions): RouteOptions {
+                return routeOptions.toBuilder()
+                    .alternatives(false)
+                    .enableRefresh(false)
+                    .overview(
+                        if (dataSaverMode == DataSaverMode.OFF) DirectionsCriteria.OVERVIEW_FULL
+                        else DirectionsCriteria.OVERVIEW_SIMPLIFIED
+                    )
+                    .geometries(
+                        if (dataSaverMode == DataSaverMode.OFF) routeGeometryPrecision
+                        else DirectionsCriteria.GEOMETRY_POLYLINE
+                    )
+                    .steps(dataSaverMode != DataSaverMode.AGGRESSIVE)
+                    .voiceInstructions(dataSaverMode == DataSaverMode.OFF)
+                    .build()
+            }
+        })
 
 
-        mapboxNavigation?.startTripSession()
+
+        applyTripSessionBehavior()
         sendEvent("mapboxNavigation", mapOf("isInitialized" to true))
         Log.d(TAG, "Componentes de navegação inicializados.")
     }
@@ -631,6 +799,16 @@ class MapboxPlatformView(
     @SuppressLint("MissingPermission")
     fun createRoute(origin: List<Double>?, destination: List<Double>?, waypointsList: List<List<Double>>?, isDestinationChange: Boolean = false) {
         if (mapboxNavigation == null || origin == null || destination == null) return
+        if (origin.size != 2 || destination.size != 2) {
+            sendEvent("error", mapOf("message" to "Origem e destino devem conter [latitude, longitude]."))
+            return
+        }
+        if (!isValidCoordinate(origin[0], true) || !isValidCoordinate(origin[1], false) ||
+            !isValidCoordinate(destination[0], true) || !isValidCoordinate(destination[1], false)
+        ) {
+            sendEvent("error", mapOf("message" to "Coordenadas inválidas. Verifique latitude/longitude."))
+            return
+        }
 
         val originPoint = if (navigationLocationProvider.lastLocation != null) {
             Point.fromLngLat(navigationLocationProvider.lastLocation!!.longitude, navigationLocationProvider.lastLocation!!.latitude)
@@ -642,30 +820,47 @@ class MapboxPlatformView(
         val waypoints = waypointsList?.map { Point.fromLngLat(it[1], it[0]) }
 
         val options = buildRouteOptions(originPoint, destinationPoint, waypoints)
+        val routeSignature = buildRouteSignature(originPoint, destinationPoint, waypoints)
+        val skipReason = routeRequestGate.skipReason(routeSignature, performancePolicy)
+        if (skipReason != null) {
+            sendEvent("routeRequestSkipped", mapOf("reason" to skipReason.name.lowercase()))
+            return
+        }
+        routeRequestGate.markInFlight(routeSignature)
 
         mapboxNavigation?.requestRoutes(options, object : NavigationRouterCallback {
             override fun onCanceled(routeOptions: RouteOptions, routerOrigin: String) {
+                routeRequestGate.clearInFlight()
+                pendingStartNavigation = false
                 sendEvent("routeCanceled", null)
             }
             override fun onFailure(reasons: List<RouterFailure>, routeOptions: RouteOptions) {
+                routeRequestGate.clearInFlight()
+                pendingStartNavigation = false
                 val message = reasons.joinToString(", ") { it.message }
                 sendEvent("error", mapOf("type" to "routeCalculationFailure", "message" to message))
             }
 
             override fun onRoutesReady(routes: List<NavigationRoute>, routerOrigin: String) {
+                routeRequestGate.clearInFlight()
                 val validRoutes = routes.filter { !isRouteInForbiddenZone(it.directionsRoute) }
-                if (routes.isNotEmpty()) {
-                    mapboxNavigation?.setNavigationRoutes(routes)
-                    navigationCamera?.requestNavigationCameraToOverview()
+                if (validRoutes.isNotEmpty()) {
+                    mapboxNavigation?.setNavigationRoutes(validRoutes)
+                    if (behaviorPolicy.autoOverviewOnRouteReady) {
+                        navigationCamera?.requestNavigationCameraToOverview()
+                    }
                     sendEvent("routeCreated", mapOf(
-                        "routeId" to routes.first().directionsRoute.hashCode().toString(),
-                        "routeCount" to routes.size,
-                        "distance" to routes.first().directionsRoute.distance(),
-                        "duration" to routes.first().directionsRoute.duration()
+                        "routeId" to validRoutes.first().directionsRoute.hashCode().toString(),
+                        "routeCount" to validRoutes.size,
+                        "distance" to validRoutes.first().directionsRoute.distance(),
+                        "duration" to validRoutes.first().directionsRoute.duration()
                     ))
-                    if(isDestinationChange){
+                    if (isDestinationChange || pendingStartNavigation) {
+                        pendingStartNavigation = false
                         setRouteAndStartNavigation()
-                        navigationCamera?.requestNavigationCameraToFollowing()
+                        if (behaviorPolicy.autoFollowOnDestinationChange) {
+                            navigationCamera?.requestNavigationCameraToFollowing()
+                        }
                     }
                 } else {
                     sendEvent("routeCreated", mapOf("routeCount" to 0))
@@ -690,12 +885,12 @@ class MapboxPlatformView(
                 return
             }
             Log.d(TAG, "Rota não existe, tentando criar antes de iniciar a navegação.")
+            pendingStartNavigation = true
             createRoute(origin, destination, waypoints)
             return
         }
 
         setRouteAndStartNavigation()
-        sendEvent("navigationStarted", null)
         Log.d(TAG, "Navegação iniciada.")
     }
 
@@ -722,7 +917,12 @@ class MapboxPlatformView(
     }
 
     fun cancelNavigation() {
-        //mapboxNavigation?.stopTripSession()
+        pendingStartNavigation = false
+        if (isTripSessionActive) {
+            mapboxNavigation?.stopTripSession()
+            isTripSessionActive = false
+            sendEvent("tripSessionStateChanged", mapOf("active" to false))
+        }
         mapboxNavigation?.setNavigationRoutes(emptyList())
         _mapView?.mapboxMap?.style?.let { style ->
             routeLineApi.cancel()
@@ -750,17 +950,29 @@ class MapboxPlatformView(
         waypoints?.let { coordinates.addAll(it) }
         coordinates.add(destination)
 
+        val effectiveGeometry = when (dataSaverMode) {
+            DataSaverMode.OFF -> routeGeometryPrecision
+            DataSaverMode.BALANCED, DataSaverMode.AGGRESSIVE -> DirectionsCriteria.GEOMETRY_POLYLINE
+        }
+        val effectiveOverview = when (dataSaverMode) {
+            DataSaverMode.OFF -> DirectionsCriteria.OVERVIEW_FULL
+            DataSaverMode.BALANCED, DataSaverMode.AGGRESSIVE -> DirectionsCriteria.OVERVIEW_SIMPLIFIED
+        }
+        val emitSteps = dataSaverMode != DataSaverMode.AGGRESSIVE
+        val emitVoiceInstructions = dataSaverMode == DataSaverMode.OFF
+
         val optionsBuilder = RouteOptions.builder()
             .applyDefaultNavigationOptions()
             .coordinatesList(coordinates)
             .profile(routeProfile)
             .language(routeLanguage)
             .voiceUnits(routeUnits)
-            .geometries(routeGeometryPrecision)
-            .steps(true)
-            .voiceInstructions(true)
-            .alternatives(false)
-            .enableRefresh(false)
+            .geometries(effectiveGeometry)
+            .overview(effectiveOverview)
+            .steps(emitSteps)
+            .voiceInstructions(emitVoiceInstructions)
+            .alternatives(allowAlternatives)
+            .enableRefresh(enableRouteRefresh)
 
         if (isTruck) {
             val exclusions = mutableListOf<String>()
@@ -776,6 +988,43 @@ class MapboxPlatformView(
         }
 
         return optionsBuilder.build()
+    }
+
+    private fun buildRouteSignature(origin: Point, destination: Point, waypoints: List<Point>?): String {
+        val waypointKey = waypoints
+            ?.joinToString("|") { "${it.latitude()},${it.longitude()}" }
+            ?: ""
+        return listOf(
+            origin.latitude(),
+            origin.longitude(),
+            destination.latitude(),
+            destination.longitude(),
+            routeProfile,
+            routeLanguage,
+            routeUnits,
+            allowAlternatives,
+            enableRouteRefresh,
+            isTruck,
+            avoidList.joinToString(","),
+            waypointKey,
+        ).joinToString(";")
+    }
+
+    private fun shouldEmitOfflineProgress(region: String, percent: Double): Boolean {
+        val lastPercent = lastOfflineProgressPercentByRegion[region] ?: -1.0
+        val isComplete = percent >= 100.0
+        val significantProgress = (percent - lastPercent) >= 1.0
+        if (!isComplete && !significantProgress) {
+            return false
+        }
+
+        val limiter = offlineProgressLimiterByRegion.getOrPut(region) { EventRateLimiter() }
+        if (!isComplete && !limiter.shouldEmit(performancePolicy.offlineProgressEventMinIntervalMs)) {
+            return false
+        }
+
+        lastOfflineProgressPercentByRegion[region] = percent
+        return true
     }
 
     private fun isRouteInForbiddenZone(route: DirectionsRoute): Boolean {
@@ -795,15 +1044,23 @@ class MapboxPlatformView(
     private fun setRouteAndStartNavigation() {
         val currentRoutes = routeLineApi.getNavigationRoutes()
         if (currentRoutes.isNotEmpty()) {
+            if (!isTripSessionActive) {
+                mapboxNavigation?.startTripSession()
+                isTripSessionActive = true
+                sendEvent("tripSessionStateChanged", mapOf("active" to true))
+            }
             mapboxNavigation?.setNavigationRoutes(currentRoutes)
             navigationCamera?.requestNavigationCameraToFollowing()
             sendEvent("navigationStarted", null)
             cacheRouteData(currentRoutes.first())
         }
-        sendEvent("navigationStarted", null)
     }
 
     private fun sendEvent(type: String, data: Map<String, Any?>?) {
+        if (dataSaverMode == DataSaverMode.AGGRESSIVE &&
+            (type == "tripProgressUpdate" || type == "locationUpdate" || type == "maneuverUpdate")) {
+            return
+        }
         val payload = data?.toMutableMap() ?: mutableMapOf()
         payload["type"] = type
         val jsonPayload = JSONObject(payload).toString()
@@ -811,7 +1068,7 @@ class MapboxPlatformView(
             try {
                 eventSink?.success(jsonPayload)
             } catch (e: Exception) {
-                Log.e(TAG, "Erro ao enviar evento para Flutter: $e")
+                if (dataSaverMode == DataSaverMode.OFF) Log.e(TAG, "Erro ao enviar evento para Flutter: $e")
             }
         }
     }
@@ -856,59 +1113,15 @@ class MapboxPlatformView(
         //_mapView = null
         eventChannel.setStreamHandler(null)
         methodChannel.setMethodCallHandler(null)
+        routeRequestGate.reset()
+        locationEventLimiter.reset()
+        tripProgressEventLimiter.reset()
+        offlineProgressLimiterByRegion.clear()
+        lastOfflineProgressPercentByRegion.clear()
         activityPluginBinding = null
         lifecycleHelper?.dispose()
         lifecycleHelper = null
         mapView?.setViewTreeLifecycleOwner(null)
         Log.d(TAG, "MapboxPlatformView com ID $viewId descartada e recursos liberados.")
-    }
-}
-
-private class LifecycleHelper(
-    val parentLifecycle: Lifecycle,
-    val shouldDestroyOnDestroy: Boolean,
-) : LifecycleOwner, DefaultLifecycleObserver {
-
-    val lifecycleRegistry: LifecycleRegistry = LifecycleRegistry(this)
-
-    init {
-        parentLifecycle.addObserver(this)
-    }
-
-    override val lifecycle: Lifecycle
-        get() = lifecycleRegistry
-
-    override fun onCreate(owner: LifecycleOwner) {
-        lifecycleRegistry.currentState = Lifecycle.State.CREATED
-    }
-
-    override fun onStart(owner: LifecycleOwner) {
-        lifecycleRegistry.currentState = Lifecycle.State.STARTED
-    }
-
-    override fun onResume(owner: LifecycleOwner) {
-        lifecycleRegistry.currentState = Lifecycle.State.RESUMED
-    }
-
-    override fun onPause(owner: LifecycleOwner) {
-        lifecycleRegistry.currentState = Lifecycle.State.STARTED
-    }
-
-    override fun onStop(owner: LifecycleOwner) {
-        lifecycleRegistry.currentState = Lifecycle.State.CREATED
-    }
-
-    override fun onDestroy(owner: LifecycleOwner) = propagateDestroyEvent()
-
-    fun dispose() {
-        parentLifecycle.removeObserver(this)
-        propagateDestroyEvent()
-    }
-
-    private fun propagateDestroyEvent() {
-        lifecycleRegistry.currentState = when (shouldDestroyOnDestroy) {
-            true -> Lifecycle.State.DESTROYED
-            false -> Lifecycle.State.CREATED
-        }
     }
 }

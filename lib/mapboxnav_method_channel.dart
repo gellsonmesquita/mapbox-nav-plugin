@@ -1,5 +1,6 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
+import 'src/data/performance_policy.dart';
 
 import 'mapboxnav_platform_interface.dart';
 
@@ -12,5 +13,10 @@ class MethodChannelMapboxNavPlugin extends MapboxNavPlatform {
   Future<String?> getPlatformVersion() async {
     final version = await methodChannel.invokeMethod<String>('getPlatformVersion');
     return version;
+  }
+
+  @override
+  Future<void> setPerformancePolicy(PerformancePolicy policy) async {
+    await methodChannel.invokeMethod('setPerformancePolicy', policy.toMap());
   }
 }

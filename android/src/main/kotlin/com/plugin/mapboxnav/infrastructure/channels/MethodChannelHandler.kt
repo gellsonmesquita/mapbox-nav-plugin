@@ -44,6 +44,61 @@ class MethodChannelHandler : MethodChannel.MethodCallHandler {
                 targetView?.toggleTraffic(show)
                 result.success(null)
             }
+            "setVoiceInstructionsMuted" -> {
+                if (targetView == null) {
+                    result.viewNotFound()
+                    return
+                }
+                val muted = call.argument<Boolean>("muted")
+                if (muted == null) {
+                    result.error("MISSING_ARG", "Muted flag is required", null)
+                    return
+                }
+                targetView.updateVoiceInstructionsMuted(muted)
+                result.success(true)
+            }
+            "setTripSessionActive" -> {
+                if (targetView == null) {
+                    result.viewNotFound()
+                    return
+                }
+                val active = call.argument<Boolean>("active")
+                if (active == null) {
+                    result.error("MISSING_ARG", "Active flag is required", null)
+                    return
+                }
+                targetView.setTripSessionActive(active)
+                result.success(true)
+            }
+            "setPerformancePolicy" -> {
+                if (targetView == null) {
+                    result.viewNotFound()
+                    return
+                }
+                @Suppress("UNCHECKED_CAST")
+                val args = call.arguments as? Map<String, Any>
+                targetView.setPerformancePolicy(args)
+                result.success(true)
+            }
+            "setDataSaverMode" -> {
+                if (targetView == null) {
+                    result.viewNotFound()
+                    return
+                }
+                val mode = call.argument<String>("mode")
+                targetView.setDataSaverMode(mode)
+                result.success(true)
+            }
+            "setNavigationBehavior" -> {
+                if (targetView == null) {
+                    result.viewNotFound()
+                    return
+                }
+                @Suppress("UNCHECKED_CAST")
+                val args = call.arguments as? Map<String, Any>
+                targetView.setNavigationBehavior(args)
+                result.success(true)
+            }
             "changeDestination" -> {
                 handleChangeDestination(call, result, targetView)
             }
