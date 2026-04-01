@@ -12,6 +12,10 @@ object MapboxConfig {
     const val DEFAULT_LANGUAGE = "en"
     const val DEFAULT_VOICE_UNITS = "imperial"
 
+    // Data usage defaults (balanced mode by default to reduce network traffic).
+    const val DEFAULT_DATA_SAVER_MODE = "BALANCED"
+    const val DEFAULT_LOCATION_UPDATE_INTERVAL_MS = 3000L
+
     // Performance Policy (0 keeps legacy behavior)
     const val DEFAULT_ROUTE_REQUEST_COOLDOWN_MS = 0L
     const val DEFAULT_LOCATION_EVENT_INTERVAL_MS = 0L

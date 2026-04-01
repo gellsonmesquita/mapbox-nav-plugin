@@ -3,7 +3,6 @@ import 'package:mapboxnav/mapboxnav.dart';
 import 'dart:async';
 
 import 'package:permission_handler/permission_handler.dart';
-import 'package:mapboxnav/src/data/performance_policy.dart';
 
 void main() {
   runApp(const MyApp());
@@ -39,14 +38,14 @@ class _NavigationScreenState extends State<NavigationScreen> {
   String _currentInstruction = 'Nenhuma instrução.';
   String _eta = 'Calculando...';
   String _distanceRemaining = 'Calculando...';
-  String _dataSaverMode = 'OFF';
+  DataSaverMode _dataSaverMode = DataSaverMode.off;
   String _infoMessage = '';
 
   PerformancePolicy? _customPolicy;
   String _downloadStatus = '';
   bool _isDownloading = false;
 
-  final List<double> _origin = [-8.814655, 13.230176]; // Banco Nacional de Angola (BNA), Rua 1º de Maio, Luanda
+  final List<double> _origin = [-8.814655, 13.230176];
   final List<double> _destination = [-8.811000, 13.234000]; // Banco Angolano de Investimentos (BAI), Edifício Escom, Kinaxixi, Luanda
   final List<double> _newDestination = [-8.823000, 13.242000]; // Banco Millennium Atlântico, Cidade Financeira, Talatona, Luanda
 
@@ -87,6 +86,12 @@ class _NavigationScreenState extends State<NavigationScreen> {
     });
     _eventSubscription = _controller!.events.listen(_handleNavigationEvent);
     _controller!.setPerformancePolicy(PerformancePolicy.defaults());
+    _controller!.setNavigationBehavior(const NavigationBehaviorPolicy(
+      autoOverviewOnRouteReady: true,
+      autoFollowOnFirstLocation: true,
+      autoFollowOnDestinationChange: true,
+      autoStartTripSession: true,
+    ));
   }
 
   void _handleNavigationEvent(MapboxNavigationEvent event) {
@@ -134,7 +139,7 @@ class _NavigationScreenState extends State<NavigationScreen> {
           _distanceRemaining = '0 m';
           break;
         case 'tripSessionStateChanged':
-          _navigationStatus = 'Estado da sessão: ${event['state']}';
+          _navigationStatus = 'Estado da sessão: ${event['active'] == true ? 'ativa' : 'inativa'}';
           break;
         case 'error':
           _navigationStatus = 'Erro: ${event['message']}';
@@ -156,7 +161,7 @@ class _NavigationScreenState extends State<NavigationScreen> {
           break;
         case 'tripProgressUpdate':
         case 'maneuverUpdate':
-          if (_dataSaverMode == 'AGRESSIVE') {
+          if (_dataSaverMode == DataSaverMode.aggressive) {
             _infoMessage = 'Eventos de navegação reduzidos para economizar dados.';
           } else {
             _infoMessage = '';
@@ -172,41 +177,28 @@ class _NavigationScreenState extends State<NavigationScreen> {
 
   // Exemplo de PerformancePolicy customizada
   PerformancePolicy _buildCustomPolicy() {
-    return PerformancePolicy(
+    return const PerformancePolicy(
       routeRequestCooldownMs: 8000,
       locationEventMinIntervalMs: 2000,
       tripProgressEventMinIntervalMs: 2000,
       offlineProgressEventMinIntervalMs: 2000,
       skipDuplicateRouteRequests: true,
-      locationGranularity: LocationGranularity.balanced,
-      reduceFlutterEvents: true,
-      enableRouteCache: true,
-      enableTelemetry: false,
-      dataSaverMode: DataSaverMode.balanced,
-      allowOfflineDownloadOnCellular: false,
-      forceOfflineRedownload: false,
     );
   }
 
-  void _setDataSaverMode(String mode) async {
+  void _setDataSaverMode(DataSaverMode mode) async {
     if (_controller != null) {
       PerformancePolicy policy;
       switch (mode) {
-        case 'OFF':
+        case DataSaverMode.off:
           policy = PerformancePolicy.off();
           break;
-        case 'BALANCED':
+        case DataSaverMode.balanced:
           policy = PerformancePolicy.balanced();
           break;
-        case 'AGGRESSIVE':
+        case DataSaverMode.aggressive:
           policy = PerformancePolicy.aggressive();
           break;
-        case 'CUSTOM':
-          _customPolicy ??= _buildCustomPolicy();
-          policy = _customPolicy!;
-          break;
-        default:
-          policy = PerformancePolicy.defaults();
       }
       await _controller!.setPerformancePolicy(policy);
       await _controller!.setDataSaverMode(mode);
@@ -215,6 +207,18 @@ class _NavigationScreenState extends State<NavigationScreen> {
       });
     }
   }
+
+  void _setCustomMode() async {
+    if (_controller == null) return;
+    _customPolicy ??= _buildCustomPolicy();
+    await _controller!.setPerformancePolicy(_customPolicy!);
+    await _controller!.setDataSaverMode(DataSaverMode.balanced);
+    setState(() {
+      _dataSaverMode = DataSaverMode.balanced;
+      _infoMessage = 'Custom policy aplicada com DataSaverMode BALANCED.';
+    });
+  }
+
 
   void _downloadOfflineRegion() async {
     if (_controller == null || _isDownloading) return;
@@ -267,7 +271,7 @@ class _NavigationScreenState extends State<NavigationScreen> {
                           Text('Instrução: $_currentInstruction', style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
                           Text('ETA: $_eta, Distância: $_distanceRemaining', style: const TextStyle(fontSize: 16)),
                           const SizedBox(height: 8),
-                          Text('Modo de economia de dados: $_dataSaverMode', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+                          Text('Modo de economia de dados: ${_dataSaverMode.nativeValue}', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
                           if (_downloadStatus.isNotEmpty)
                             Padding(
                               padding: const EdgeInsets.symmetric(vertical: 4.0),
@@ -305,7 +309,7 @@ class _NavigationScreenState extends State<NavigationScreen> {
                                 ),
                                 const SizedBox(width: 8),
                                 ElevatedButton(
-                                  onPressed: () => _setDataSaverMode('CUSTOM'),
+                                  onPressed: _setCustomMode,
                                   child: const Text('Custom Policy'),
                                 ),
                               ],
@@ -314,17 +318,17 @@ class _NavigationScreenState extends State<NavigationScreen> {
                           Row(
                             children: [
                               ElevatedButton(
-                                onPressed: () => _setDataSaverMode('OFF'),
+                                onPressed: () => _setDataSaverMode(DataSaverMode.off),
                                 child: const Text('OFF'),
                               ),
                               const SizedBox(width: 8),
                               ElevatedButton(
-                                onPressed: () => _setDataSaverMode('BALANCED'),
+                                onPressed: () => _setDataSaverMode(DataSaverMode.balanced),
                                 child: const Text('BALANCED'),
                               ),
                               const SizedBox(width: 8),
                               ElevatedButton(
-                                onPressed: () => _setDataSaverMode('AGGRESSIVE'),
+                                onPressed: () => _setDataSaverMode(DataSaverMode.aggressive),
                                 child: const Text('AGGRESSIVE'),
                               ),
                             ],
