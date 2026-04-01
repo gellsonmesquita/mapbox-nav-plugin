@@ -82,6 +82,7 @@ import com.mapbox.navigation.voice.model.SpeechAnnouncement
 import com.mapbox.navigation.voice.model.SpeechError
 import com.mapbox.navigation.voice.model.SpeechValue
 import com.mapbox.navigation.voice.model.SpeechVolume
+import com.plugin.mapboxnav.core.config.MapboxConfig
 import com.plugin.mapboxnav.domain.models.DataSaverMode
 import com.plugin.mapboxnav.domain.models.NavigationBehaviorPolicy
 import com.plugin.mapboxnav.domain.models.PerformancePolicy
@@ -94,6 +95,7 @@ import io.flutter.embedding.engine.plugins.activity.ActivityPluginBinding
 import io.flutter.plugin.common.BinaryMessenger
 import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.EventChannel.EventSink
+import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 import io.flutter.plugin.platform.PlatformView
 import kotlinx.coroutines.launch
@@ -111,6 +113,7 @@ class MapboxPlatformView(
     private val viewId: Int,
     private var activityPluginBinding: ActivityPluginBinding?,
     private val lifecycleProvider: Lifecycle,
+    private val creationParams: Map<String, Any?>? = null,
 ) : PlatformView, EventChannel.StreamHandler, DefaultLifecycleObserver {
 
     private val TAG = "MapboxPlatformView"
@@ -148,7 +151,7 @@ class MapboxPlatformView(
     private val navigationLocationProvider = NavigationLocationProvider()
     private var currentDirectionsRoute: DirectionsRoute? = null
     private var performancePolicy = PerformancePolicy()
-    private var dataSaverMode = DataSaverMode.OFF
+    private var dataSaverMode = DataSaverMode.from(MapboxConfig.DEFAULT_DATA_SAVER_MODE)
     private var isWifiConnected: Boolean = true
     private var behaviorPolicy = NavigationBehaviorPolicy()
     private val locationEventLimiter = EventRateLimiter()
@@ -166,7 +169,7 @@ class MapboxPlatformView(
         }
     private var lifecycleHelper: LifecycleHelper? = null
 
-    private var locationUpdateIntervalMs: Long = 1000L
+    private var locationUpdateIntervalMs: Long = MapboxConfig.DEFAULT_LOCATION_UPDATE_INTERVAL_MS
 
     private val tileStore: TileStore by lazy { TileStore.create() }
     private val offlineManager: OfflineManager by lazy { OfflineManager() }
@@ -346,98 +349,251 @@ class MapboxPlatformView(
         eventChannel = EventChannel(messenger, "$eventChannelBaseName/$viewId")
         eventChannel.setStreamHandler(this)
         methodChannel = MethodChannel(messenger, "$eventChannelBaseName/$viewId/methods")
+        applyCreationParamsDefaults()
         val fiveGigabytes = 5L * 1024 * 1024 * 1024
         tileStore.setOption(TileStoreOptions.DISK_QUOTA, Value(fiveGigabytes))
         methodChannel.setMethodCallHandler { call, result ->
-            when (call.method) {
-                "toggleVoiceInstructions" -> {
-                    isVoiceInstructionsMuted = !isVoiceInstructionsMuted
-                    result.success(null)
-                }
-                "setVoiceInstructionsMuted" -> {
-                    val muted = call.argument<Boolean>("muted")
-                    if (muted == null) {
-                        result.error("INVALID_ARGS", "Argument 'muted' is required", null)
-                    } else {
-                        isVoiceInstructionsMuted = muted
-                        result.success(null)
-                    }
-                }
-                "recenter" -> {
-                    navigationCamera?.requestNavigationCameraToFollowing()
-                    sendEvent("recenterTriggered", null)
-                    result.success(null)
-                }
-                "showRouteOverview" -> {
-                    navigationCamera?.requestNavigationCameraToOverview()
-                    sendEvent("routeOverviewTriggered", null)
-                    result.success(null)
-                }
-                "updateRouteOptions" -> {
-                    val args = call.arguments as? Map<*, *>
-                    isTruck = args?.get("isTruck") as? Boolean ?: isTruck
-                    maxHeight = (args?.get("maxHeight") as? Number)?.toDouble() ?: maxHeight
-                    maxWeight = (args?.get("maxWeight") as? Number)?.toDouble() ?: maxWeight
-                    routeProfile = args?.get("profile") as? String ?: routeProfile // "driving" ou "driving-traffic"
-                    routeLanguage = args?.get("language") as? String ?: routeLanguage
-                    routeUnits = args?.get("units") as? String ?: routeUnits // "metric" ou "imperial"
-                    allowAlternatives = args?.get("alternatives") as? Boolean ?: allowAlternatives
-                    enableRouteRefresh = args?.get("enableRefresh") as? Boolean ?: enableRouteRefresh
-                    @Suppress("UNCHECKED_CAST")
-                    val flutterExclusions = args?.get("excludeList") as? List<String>
-                    if (flutterExclusions != null) {
-                        avoidList = flutterExclusions.toMutableList()
-                    }
-                    result.success(null)
-                }
-                "setPerformancePolicy" -> {
-                    @Suppress("UNCHECKED_CAST")
-                    val args = call.arguments as? Map<String, Any>
-                    setPerformancePolicy(args)
-                    result.success(null)
-                }
-                "setDataSaverMode" -> {
-                    val modeName = call.argument<String>("mode")
-                    setDataSaverMode(modeName)
-                    result.success(null)
-                }
-                "setNavigationBehavior" -> {
-                    @Suppress("UNCHECKED_CAST")
-                    val args = call.arguments as? Map<String, Any>
-                    setNavigationBehavior(args)
-                    result.success(null)
-                }
-                "setTripSessionActive" -> {
-                    val active = call.argument<Boolean>("active")
-                    if (active == null) {
-                        result.error("INVALID_ARGS", "Argument 'active' is required", null)
-                    } else {
-                        setTripSessionActive(active)
-                        result.success(null)
-                    }
-                }
-                "setForbiddenZones" -> {
-                    // {"lat": double, "lng": double}
-                    val zones = call.argument<List<List<Map<String, Double>>>>("zones")
-                    forbiddenZones.clear()
-                    zones?.forEach { polygonCoords ->
-                        val points = polygonCoords.map { coord ->
-                            Point.fromLngLat(
-                                coord["lng"] ?: 0.0,
-                                coord["lat"] ?: 0.0
-                            )
-                        }
-                        if (points.isNotEmpty()) {
-                            forbiddenZones.add(Polygon.fromLngLats(listOf(points)))
-                        }
-                    }
-                    Log.d(TAG, "Zonas proibidas atualizadas: ${forbiddenZones.size} zonas carregadas.")
-                    result.success(null)
-                }
-                else -> result.notImplemented()
+            if (!handleMethodCall(call, result)) {
+                result.notImplemented()
             }
         }
         initMapView()
+    }
+
+    @RequiresPermission(allOf = [Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION])
+    fun handleMethodCall(call: MethodCall, result: MethodChannel.Result): Boolean {
+        when (call.method) {
+            "getPlatformVersion" -> {
+                result.success("Android ${android.os.Build.VERSION.RELEASE}")
+                return true
+            }
+            "toggleVoiceInstructions" -> {
+                isVoiceInstructionsMuted = !isVoiceInstructionsMuted
+                result.success(null)
+                return true
+            }
+            "setVoiceInstructionsMuted" -> {
+                val muted = call.argument<Boolean>("muted")
+                if (muted == null) {
+                    result.error("INVALID_ARGS", "Argument 'muted' is required", null)
+                } else {
+                    isVoiceInstructionsMuted = muted
+                    result.success(null)
+                }
+                return true
+            }
+            "recenter" -> {
+                navigationCamera?.requestNavigationCameraToFollowing()
+                sendEvent("recenterTriggered", null)
+                result.success(null)
+                return true
+            }
+            "showRouteOverview" -> {
+                navigationCamera?.requestNavigationCameraToOverview()
+                sendEvent("routeOverviewTriggered", null)
+                result.success(null)
+                return true
+            }
+            "updateRouteOptions" -> {
+                applyRouteOptions(call.arguments as? Map<*, *>)
+                result.success(null)
+                return true
+            }
+            "setPerformancePolicy" -> {
+                @Suppress("UNCHECKED_CAST")
+                val args = call.arguments as? Map<String, Any>
+                setPerformancePolicy(args)
+                result.success(null)
+                return true
+            }
+            "setDataSaverMode" -> {
+                val modeName = call.argument<String>("mode")
+                setDataSaverMode(modeName)
+                result.success(null)
+                return true
+            }
+            "setDataUsageConfig" -> {
+                @Suppress("UNCHECKED_CAST")
+                val args = call.arguments as? Map<String, Any>
+                applyDataUsageConfig(args)
+                result.success(null)
+                return true
+            }
+            "setNavigationBehavior" -> {
+                @Suppress("UNCHECKED_CAST")
+                val args = call.arguments as? Map<String, Any>
+                setNavigationBehavior(args)
+                result.success(null)
+                return true
+            }
+            "setTripSessionActive" -> {
+                val active = call.argument<Boolean>("active")
+                if (active == null) {
+                    result.error("INVALID_ARGS", "Argument 'active' is required", null)
+                } else {
+                    setTripSessionActive(active)
+                    result.success(null)
+                }
+                return true
+            }
+            "setForbiddenZones" -> {
+                val zones = call.argument<List<List<Map<String, Double>>>>("zones")
+                forbiddenZones.clear()
+                zones?.forEach { polygonCoords ->
+                    val points = polygonCoords.map { coord ->
+                        Point.fromLngLat(coord["lng"] ?: 0.0, coord["lat"] ?: 0.0)
+                    }
+                    if (points.isNotEmpty()) {
+                        forbiddenZones.add(Polygon.fromLngLats(listOf(points)))
+                    }
+                }
+                Log.d(TAG, "Zonas proibidas atualizadas: ${forbiddenZones.size} zonas carregadas.")
+                result.success(null)
+                return true
+            }
+            "createRoute" -> {
+                val origin = call.argument<List<Double>>("origin")
+                val destination = call.argument<List<Double>>("destination")
+                val waypoints = call.argument<List<List<Double>>>("waypoints")
+                if (origin == null || destination == null) {
+                    result.error("MISSING_ARG", "Origin and destination are required", null)
+                } else {
+                    createRoute(origin, destination, waypoints)
+                    result.success(true)
+                }
+                return true
+            }
+            "startNavigation" -> {
+                val origin = call.argument<List<Double>>("origin")
+                val destination = call.argument<List<Double>>("destination")
+                val waypoints = call.argument<List<List<Double>>>("waypoints")
+                if (destination == null) {
+                    result.error("MISSING_ARG", "Destination is required", null)
+                } else {
+                    startNavigation(origin, destination, waypoints)
+                    result.success(true)
+                }
+                return true
+            }
+            "changeDestination" -> {
+                val newDestination = call.argument<List<Double>>("newDestination")
+                val origin = call.argument<List<Double>>("origin")
+                if (newDestination == null) {
+                    result.error("MISSING_ARG", "New destination is required", null)
+                } else {
+                    changeDestination(origin, newDestination)
+                    result.success(true)
+                }
+                return true
+            }
+            "downloadOfflineArea" -> {
+                val args = call.arguments as? Map<*, *>
+                val region = args?.get("region") as? String
+                val north = (args?.get("north") as? Number)?.toDouble()
+                val east = (args?.get("east") as? Number)?.toDouble()
+                val south = (args?.get("south") as? Number)?.toDouble()
+                val west = (args?.get("west") as? Number)?.toDouble()
+                if (region == null || north == null || east == null || south == null || west == null) {
+                    result.error("MISSING_ARG", "region, north, east, south and west are required", null)
+                } else {
+                    downloadRegionOffline(region, north, east, south, west)
+                    result.success(null)
+                }
+                return true
+            }
+            "toggleTraffic" -> {
+                val show = call.argument<Boolean>("show") ?: true
+                toggleTraffic(show)
+                result.success(null)
+                return true
+            }
+            "cancelNavigation" -> {
+                cancelNavigation()
+                result.success(true)
+                return true
+            }
+            "finishNavigation" -> {
+                finishNavigation()
+                result.success(true)
+                return true
+            }
+            "stopNavigation" -> {
+                stopNavigation()
+                result.success(true)
+                return true
+            }
+            else -> return false
+        }
+    }
+
+    private fun applyCreationParamsDefaults() {
+        val params = creationParams ?: emptyMap<String, Any?>()
+        val initialMode = params["dataSaverMode"] as? String ?: MapboxConfig.DEFAULT_DATA_SAVER_MODE
+        setDataSaverMode(initialMode)
+
+        @Suppress("UNCHECKED_CAST")
+        val routeArgs = params["routeOptions"] as? Map<*, *>
+        applyRouteOptions(routeArgs)
+
+        @Suppress("UNCHECKED_CAST")
+        val perfArgs = params["performancePolicy"] as? Map<String, Any>
+        if (perfArgs != null) {
+            setPerformancePolicy(perfArgs)
+        }
+
+        @Suppress("UNCHECKED_CAST")
+        val behaviorArgs = params["navigationBehavior"] as? Map<String, Any>
+        if (behaviorArgs != null) {
+            behaviorPolicy = NavigationBehaviorPolicy.fromMap(behaviorArgs)
+        }
+
+        locationUpdateIntervalMs =
+            (params["locationUpdateIntervalMs"] as? Number)?.toLong() ?: locationUpdateIntervalMs
+    }
+
+    private fun applyRouteOptions(args: Map<*, *>?) {
+        isTruck = args?.get("isTruck") as? Boolean ?: isTruck
+        maxHeight = (args?.get("maxHeight") as? Number)?.toDouble() ?: maxHeight
+        maxWeight = (args?.get("maxWeight") as? Number)?.toDouble() ?: maxWeight
+        maxWidth = (args?.get("maxWidth") as? Number)?.toDouble() ?: maxWidth
+        routeProfile = args?.get("profile") as? String ?: routeProfile
+        routeLanguage = args?.get("language") as? String ?: routeLanguage
+        routeUnits = args?.get("units") as? String ?: routeUnits
+        routeGeometryPrecision = args?.get("geometryPrecision") as? String ?: routeGeometryPrecision
+        allowAlternatives = args?.get("alternatives") as? Boolean ?: allowAlternatives
+        enableRouteRefresh = args?.get("enableRefresh") as? Boolean ?: enableRouteRefresh
+        @Suppress("UNCHECKED_CAST")
+        val flutterExclusions = args?.get("excludeList") as? List<String>
+        if (flutterExclusions != null) {
+            avoidList = flutterExclusions.toMutableList()
+        }
+    }
+
+    private fun applyDataUsageConfig(args: Map<String, Any>?) {
+        if (args == null) return
+        setDataSaverMode(args["mode"] as? String)
+        allowAlternatives = args["allowAlternatives"] as? Boolean ?: allowAlternatives
+        enableRouteRefresh = args["enableRouteRefresh"] as? Boolean ?: enableRouteRefresh
+        routeGeometryPrecision = args["geometryPrecision"] as? String ?: routeGeometryPrecision
+        locationUpdateIntervalMs =
+            (args["locationUpdateIntervalMs"] as? Number)?.toLong() ?: locationUpdateIntervalMs
+
+        @Suppress("UNCHECKED_CAST")
+        val perfArgs = args["performancePolicy"] as? Map<String, Any>
+        if (perfArgs != null) {
+            performancePolicy = PerformancePolicy.fromMap(perfArgs)
+        }
+
+        sendEvent(
+            "dataUsageConfigChanged",
+            mapOf(
+                "mode" to dataSaverMode.name,
+                "locationUpdateIntervalMs" to locationUpdateIntervalMs,
+                "allowAlternatives" to allowAlternatives,
+                "enableRouteRefresh" to enableRouteRefresh,
+                "geometryPrecision" to routeGeometryPrecision,
+            )
+        )
     }
 
     @RequiresPermission(allOf = [Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION])

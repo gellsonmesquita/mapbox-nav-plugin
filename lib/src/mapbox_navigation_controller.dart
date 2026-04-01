@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:mapboxnav/src/data/mapbox_config.dart';
+import 'package:mapboxnav/src/data/navigation_behavior_policy.dart';
 import 'package:mapboxnav/src/data/performance_policy.dart';
 
 typedef MapboxNavigationEvent = Map<String, dynamic>;
@@ -23,6 +24,10 @@ class MapboxNavigationController extends ChangeNotifier {
     _eventChannel = EventChannel('nav_event/$_viewId');
     _methodEventChannel = MethodChannel('nav_event/$_viewId/methods');
     _listenToEvents();
+  }
+
+  Future<String?> getPlatformVersion() async {
+    return _methodChannel.invokeMethod<String>('getPlatformVersion');
   }
 
   void _listenToEvents() {
@@ -51,8 +56,14 @@ class MapboxNavigationController extends ChangeNotifier {
     });
   }
 
+  @Deprecated(
+    'setAccessToken nao e suportado pelo handler Android atual. '
+    'Configure o token no Android nativo ou via inicializacao da view.',
+  )
   Future<void> setAccessToken(String token) async {
-    await _methodChannel.invokeMethod('setAccessToken', token);
+    throw UnsupportedError(
+      'setAccessToken nao e suportado pelo MethodChannelHandler atual.',
+    );
   }
   Future<void> createRoute({
     required List<double> origin,
@@ -104,15 +115,12 @@ class MapboxNavigationController extends ChangeNotifier {
   }
 
   Future<void> showRouteOverview() async {
-    await _methodEventChannel.invokeMethod('showRouteOverview', {
-      'viewId': _viewId,
-    });
+    await _methodEventChannel.invokeMethod('showRouteOverview');
   }
 
+  @Deprecated('Use showRouteOverview().')
   Future<void> requestNavigationCameraToOverview() async {
-    await _methodEventChannel.invokeMethod('requestNavigationCameraToOverview', {
-      'viewId': _viewId,
-    });
+    await showRouteOverview();
   }
 
   Future<void> cancelNavigation() async {
@@ -133,6 +141,11 @@ class MapboxNavigationController extends ChangeNotifier {
     double? maxWeight,
     double? maxWidth,
     RouteProfile profile = RouteProfile.driving,
+    String language = 'pt',
+    RouteUnits units = RouteUnits.metric,
+    RouteGeometryPrecision geometryPrecision = RouteGeometryPrecision.polyline,
+    bool alternatives = false,
+    bool enableRefresh = false,
     List<ExcludeType> excludes = const [],
   }) async {
     await _methodEventChannel.invokeMethod('updateRouteOptions', {
@@ -141,8 +154,45 @@ class MapboxNavigationController extends ChangeNotifier {
       'maxWeight': maxWeight,
       'maxWidth': maxWidth,
       'profile': profile.value,
+      'language': language,
+      'units': units.value,
+      'geometryPrecision': geometryPrecision.value,
+      'alternatives': alternatives,
+      'enableRefresh': enableRefresh,
       'excludeList': excludes.map((e) => e.value).toList(),
     });
+  }
+
+  Future<void> setDataUsageConfig({
+    required DataSaverMode mode,
+    bool? allowAlternatives,
+    bool? enableRouteRefresh,
+    RouteGeometryPrecision? geometryPrecision,
+    int? locationUpdateIntervalMs,
+    PerformancePolicy? performancePolicy,
+  }) async {
+    final payload = <String, dynamic>{
+      'viewId': _viewId,
+      'mode': mode.nativeValue,
+    };
+
+    if (allowAlternatives != null) {
+      payload['allowAlternatives'] = allowAlternatives;
+    }
+    if (enableRouteRefresh != null) {
+      payload['enableRouteRefresh'] = enableRouteRefresh;
+    }
+    if (geometryPrecision != null) {
+      payload['geometryPrecision'] = geometryPrecision.value;
+    }
+    if (locationUpdateIntervalMs != null) {
+      payload['locationUpdateIntervalMs'] = locationUpdateIntervalMs;
+    }
+    if (performancePolicy != null) {
+      payload['performancePolicy'] = performancePolicy.toMap();
+    }
+
+    await _methodChannel.invokeMethod('setDataUsageConfig', payload);
   }
 
   Future<void> setForbiddenZones(List<ForbiddenZone> zones) async {
@@ -179,11 +229,45 @@ class MapboxNavigationController extends ChangeNotifier {
   }
 
   Future<void> setPerformancePolicy(PerformancePolicy policy) async {
-    await _methodChannel.invokeMethod('setPerformancePolicy', policy.toMap());
+    await _methodChannel.invokeMethod('setPerformancePolicy', {
+      'viewId': _viewId,
+      ...policy.toMap(),
+    });
   }
 
-  Future<void> setDataSaverMode(String mode) async {
-    await _methodChannel.invokeMethod('setDataSaverMode', {'mode': mode});
+  Future<void> setDataSaverMode(DataSaverMode mode) async {
+    await _methodChannel.invokeMethod('setDataSaverMode', {
+      'viewId': _viewId,
+      'mode': mode.nativeValue,
+    });
+  }
+
+  Future<void> setNavigationBehavior(NavigationBehaviorPolicy policy) async {
+    await _methodChannel.invokeMethod('setNavigationBehavior', {
+      'viewId': _viewId,
+      ...policy.toMap(),
+    });
+  }
+
+  Future<void> setTripSessionActive(bool active) async {
+    await _methodChannel.invokeMethod('setTripSessionActive', {
+      'viewId': _viewId,
+      'active': active,
+    });
+  }
+
+  Future<void> setVoiceInstructionsMuted(bool muted) async {
+    await _methodChannel.invokeMethod('setVoiceInstructionsMuted', {
+      'viewId': _viewId,
+      'muted': muted,
+    });
+  }
+
+  Future<void> toggleTraffic(bool show) async {
+    await _methodChannel.invokeMethod('toggleTraffic', {
+      'viewId': _viewId,
+      'show': show,
+    });
   }
 
   @override

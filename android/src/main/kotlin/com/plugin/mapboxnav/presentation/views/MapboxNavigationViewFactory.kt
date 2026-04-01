@@ -24,6 +24,8 @@ class MapboxNavigationViewFactory(
 
     @RequiresApi(Build.VERSION_CODES.BAKLAVA)
     override fun create(context: Context, viewId: Int, args: Any?): PlatformView {
+        @Suppress("UNCHECKED_CAST")
+        val creationParams = args as? Map<String, Any?>
 
         //MapboxOptions.accessToken = context.getString(R.string.mapbox_access_token)
 
@@ -34,6 +36,7 @@ class MapboxNavigationViewFactory(
             viewId,
             currentActivityBinding,
             lifecycleProvider,
+            creationParams,
         )
 
         MapboxViewManager.registerView(viewId, mapboxView)

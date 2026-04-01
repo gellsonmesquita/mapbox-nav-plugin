@@ -4,6 +4,10 @@ class VehicleConfig {
   final double? maxWeight;
   final double? maxWidth;
   final RouteProfile profile;
+  final String language;
+  final RouteUnits units;
+  final bool alternatives;
+  final bool enableRefresh;
   final List<ExcludeType> excludes;
 
   VehicleConfig({
@@ -12,17 +16,25 @@ class VehicleConfig {
     this.maxWeight,
     this.maxWidth,
     this.profile = RouteProfile.driving,
+    this.language = 'pt',
+    this.units = RouteUnits.metric,
+    this.alternatives = false,
+    this.enableRefresh = false,
     this.excludes = const [],
   });
 
   Map<String, dynamic> toMap() {
     return {
-      "isTruck": isTruck,
-      "maxHeight": maxHeight,
-      "maxWeight": maxWeight,
-      "maxWidth": maxWidth,
-      "profile": profile.value,
-      "excludeList": excludes.map((e) => e.value).toList(),
+      'isTruck': isTruck,
+      'maxHeight': maxHeight,
+      'maxWeight': maxWeight,
+      'maxWidth': maxWidth,
+      'profile': profile.value,
+      'language': language,
+      'units': units.value,
+      'alternatives': alternatives,
+      'enableRefresh': enableRefresh,
+      'excludeList': excludes.map((e) => e.value).toList(),
     };
   }
 }
@@ -43,6 +55,23 @@ enum ExcludeType {
   restricted('restricted');
   final String value;
   const ExcludeType(this.value);
+}
+
+enum RouteUnits {
+  metric('metric'),
+  imperial('imperial');
+
+  final String value;
+  const RouteUnits(this.value);
+}
+
+enum RouteGeometryPrecision {
+  polyline('polyline'),
+  polyline6('polyline6'),
+  geojson('geojson');
+
+  final String value;
+  const RouteGeometryPrecision(this.value);
 }
 
 class ForbiddenZone {
