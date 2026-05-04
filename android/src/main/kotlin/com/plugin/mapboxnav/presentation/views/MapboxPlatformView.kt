@@ -29,10 +29,12 @@ import com.mapbox.maps.EdgeInsets
 import com.mapbox.maps.GlyphsRasterizationMode
 import com.mapbox.maps.GlyphsRasterizationOptions
 import com.mapbox.maps.MapInitOptions
+import com.mapbox.maps.MapboxMapsOptions
 import com.mapbox.maps.MapOptions
 import com.mapbox.maps.MapView
 import com.mapbox.maps.OfflineManager
 import com.mapbox.maps.TilesetDescriptorOptions
+import com.mapbox.maps.TileStoreUsageMode
 import com.mapbox.maps.extension.style.layers.getLayer
 import com.mapbox.maps.plugin.animation.camera
 import com.mapbox.maps.plugin.attribution.attribution
@@ -44,6 +46,7 @@ import com.mapbox.navigation.base.ExperimentalPreviewMapboxNavigationAPI
 import com.mapbox.navigation.base.extensions.applyDefaultNavigationOptions
 import com.mapbox.navigation.base.formatter.DistanceFormatterOptions
 import com.mapbox.navigation.base.options.NavigationOptions
+import com.mapbox.navigation.base.options.RoutingTilesOptions
 import com.mapbox.navigation.base.route.NavigationRoute
 import com.mapbox.navigation.base.route.NavigationRouterCallback
 import com.mapbox.navigation.base.route.RouterFailure
@@ -326,7 +329,17 @@ class MapboxPlatformView(
     }
 
     private val voiceInstructionsObserver = VoiceInstructionsObserver { voiceInstructions ->
-        speechApi.generate(voiceInstructions, speechCallback)
+        if (dataSaverMode == DataSaverMode.OFF) {
+            // Cloud TTS (Mapbox API): melhor qualidade, usa rede por instrução
+            speechApi.generate(voiceInstructions, speechCallback)
+        } else {
+            // Device TTS: sem chamada de rede, usa sintetizador local do Android
+            val text = voiceInstructions.announcement() ?: return@VoiceInstructionsObserver
+            voiceInstructionsPlayer.play(
+                SpeechAnnouncement.Builder(text).build(),
+                voiceInstructionsPlayerCallback
+            )
+        }
     }
 
     private val speechCallback = MapboxNavigationConsumer<Expected<SpeechError, SpeechValue>> { expected ->
@@ -354,6 +367,12 @@ class MapboxPlatformView(
         applyCreationParamsDefaults()
         val fiveGigabytes = 5L * 1024 * 1024 * 1024
         tileStore.setOption(TileStoreOptions.DISK_QUOTA, Value(fiveGigabytes))
+        // Share the same TileStore instance with the Maps SDK so downloaded regions are used
+        MapboxMapsOptions.tileStore = tileStore
+        // READ_ONLY: checks TileStore first (uses offline tiles when available), falls back to
+        // individual tile download only for areas not yet downloaded — safe for partial coverage.
+        // READ_AND_UPDATE would force tile-pack downloads for uncovered areas (worse for mobile data).
+        MapboxMapsOptions.tileStoreUsageMode = TileStoreUsageMode.READ_ONLY
         methodChannel.setMethodCallHandler { call, result ->
             if (!handleMethodCall(call, result)) {
                 result.notImplemented()
@@ -670,6 +689,7 @@ class MapboxPlatformView(
                 locationUpdateIntervalMs = 6000L
             }
         }
+        applyMapDataSaverConfig()
         sendEvent("dataSaverModeChanged", mapOf("mode" to mode.name))
     }
 
@@ -740,6 +760,7 @@ class MapboxPlatformView(
                     .zoom(18.0)
                     .build()
             )
+            applyMapDataSaverConfig()
             _mapView?.logo?.enabled = false
             _mapView?.attribution?.enabled = false
             _mapView?.location?.apply {
@@ -826,17 +847,19 @@ class MapboxPlatformView(
             )
             val areaGeometry = Polygon.fromLngLats(coordinates)
 
-            val tilesetDescriptor = offlineManager.createTilesetDescriptor(
+            val mapTilesetDescriptor = offlineManager.createTilesetDescriptor(
                 TilesetDescriptorOptions.Builder()
                     .styleURI(NavigationStyles.NAVIGATION_DAY_STYLE)
                     .minZoom(13)
                     .maxZoom(20)
                     .build()
             )
+            // Routing tiles: enable offline route calculation within this region (no Directions API call)
+            val routingTilesetDescriptor = mapboxNavigation?.tilesetDescriptorFactory?.getLatest()
 
             val tileRegionLoadOptions = TileRegionLoadOptions.Builder()
                 .geometry(areaGeometry)
-                .descriptors(listOf(tilesetDescriptor))
+                .descriptors(listOfNotNull(mapTilesetDescriptor, routingTilesetDescriptor))
                 .acceptExpired(true)
                 .build()
 
@@ -872,6 +895,12 @@ class MapboxPlatformView(
 
         MapboxNavigationApp.setup(
             NavigationOptions.Builder(context)
+                .routingTilesOptions(
+                    // Use the same TileStore so routing tiles downloaded offline are reused
+                    RoutingTilesOptions.Builder()
+                        .tileStore(tileStore)
+                        .build()
+                )
                 .build()
         )
         MapboxNavigationApp.attach(lifecycleHelper!!)
@@ -1062,6 +1091,24 @@ class MapboxPlatformView(
 
         setRouteAndStartNavigation()
         Log.d(TAG, "Navegação iniciada.")
+    }
+
+    private fun applyMapDataSaverConfig() {
+        val map = _mapView?.mapboxMap ?: return
+        when (dataSaverMode) {
+            DataSaverMode.OFF -> {
+                map.setPrefetchZoomDelta(4)   // padrão SDK: antecipa 4 zoom levels
+                toggleTraffic(true)
+            }
+            DataSaverMode.BALANCED -> {
+                map.setPrefetchZoomDelta(1)   // só 1 nível: menos tiles buscados
+                toggleTraffic(false)          // tráfego faz polling contínuo de dados
+            }
+            DataSaverMode.AGGRESSIVE -> {
+                map.setPrefetchZoomDelta(0)   // apenas tiles visíveis agora
+                toggleTraffic(false)
+            }
+        }
     }
 
     fun toggleTraffic(show: Boolean) {
