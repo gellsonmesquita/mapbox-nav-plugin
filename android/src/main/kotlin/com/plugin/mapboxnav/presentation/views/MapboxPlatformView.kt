@@ -973,9 +973,12 @@ class MapboxPlatformView(
             viewportDataSource.followingPadding = followingPadding
         }
         navigationCamera = NavigationCamera(_mapView!!.mapboxMap, _mapView!!.camera, viewportDataSource)
-        // When actively following, lock pan so the SDK doesn't load tiles for areas off-route
+        // Lock pan only during active navigation in FOLLOWING mode to avoid loading off-route tiles.
+        // Outside navigation the user must be able to pan freely.
         navigationCamera!!.registerNavigationCameraStateChangeObserver { state ->
-            _mapView?.gestures?.scrollEnabled = (state != NavigationCameraState.FOLLOWING)
+            val activeNavigation = isTripSessionActive && currentDirectionsRoute != null
+            _mapView?.gestures?.scrollEnabled =
+                !(activeNavigation && state == NavigationCameraState.FOLLOWING)
         }
         routeLineApi = MapboxRouteLineApi(MapboxRouteLineApiOptions.Builder().build())
         routeLineView = MapboxRouteLineView(
