@@ -71,6 +71,7 @@ import com.mapbox.navigation.ui.maps.NavigationStyles
 import com.mapbox.navigation.ui.maps.camera.NavigationCamera
 import com.mapbox.navigation.ui.maps.camera.data.FollowingFrameOptions
 import com.mapbox.navigation.ui.maps.camera.data.MapboxNavigationViewportDataSource
+import com.mapbox.navigation.ui.maps.camera.state.NavigationCameraState
 import com.mapbox.navigation.ui.maps.location.NavigationLocationProvider
 import com.mapbox.navigation.ui.maps.route.arrow.api.MapboxRouteArrowApi
 import com.mapbox.navigation.ui.maps.route.arrow.api.MapboxRouteArrowView
@@ -176,7 +177,6 @@ class MapboxPlatformView(
 
     private var locationUpdateIntervalMs: Long = MapboxConfig.DEFAULT_LOCATION_UPDATE_INTERVAL_MS
 
-    private val tileStore: TileStore by lazy { TileStore.create() }
     private val offlineManager: OfflineManager by lazy { OfflineManager() }
 
     private val pixelDensity = context.resources.displayMetrics.density
@@ -218,7 +218,7 @@ class MapboxPlatformView(
             val primaryRoute = routeUpdateResult.navigationRoutes.first()
             currentDirectionsRoute = primaryRoute.directionsRoute
             Log.d(TAG, "Rota atualizada. Distância da rota: ${primaryRoute.directionsRoute.distance()}")
-            //cacheRouteData(primaryRoute)
+            cacheRouteData(primaryRoute)
             routeLineApi.setNavigationRoutes(routeUpdateResult.navigationRoutes) { value ->
                 _mapView?.mapboxMap?.style?.apply { routeLineView.renderRouteDrawData(this, value) }
             }
@@ -522,6 +522,35 @@ class MapboxPlatformView(
                 }
                 return true
             }
+            "listOfflineRegions" -> {
+                tileStore.getAllTileRegions { expected ->
+                    if (expected.isError) {
+                        result.error("TILE_STORE_ERROR", expected.error.toString(), null)
+                    } else {
+                        val regions = expected.value?.map { region ->
+                            mapOf(
+                                "id" to region.id,
+                                "completedBytes" to region.completedResourceSize,
+                                "completedCount" to region.completedResourceCount,
+                                "requiredCount" to region.requiredResourceCount,
+                            )
+                        } ?: emptyList()
+                        result.success(regions)
+                    }
+                }
+                return true
+            }
+            "deleteOfflineRegion" -> {
+                val region = call.argument<String>("region")
+                if (region == null) {
+                    result.error("MISSING_ARG", "region is required", null)
+                } else {
+                    tileStore.removeTileRegion(region)
+                    Log.d(TAG, "Região $region removida.")
+                    result.success(null)
+                }
+                return true
+            }
             "toggleTraffic" -> {
                 val show = call.argument<Boolean>("show") ?: true
                 toggleTraffic(show)
@@ -700,13 +729,22 @@ class MapboxPlatformView(
     }
 
     private fun cacheRouteData(navigationRoute: NavigationRoute) {
-        if (dataSaverMode != DataSaverMode.OFF) return
+        // Always cache the route corridor so tiles are served locally during navigation and reroutes.
+        // Zoom range adapts to mode: less detail = fewer bytes, but always enough to navigate.
+        if (dataSaverMode == DataSaverMode.AGGRESSIVE && !isWifiConnected) return
+
         val geometryStr = navigationRoute.directionsRoute.geometry() ?: return
         val routeId = "route_cache_${navigationRoute.directionsRoute.hashCode()}"
 
+        val maxZoom: Byte = when (dataSaverMode) {
+            DataSaverMode.OFF -> 20
+            DataSaverMode.BALANCED -> 17  // sufficient for turn-by-turn, ~4x fewer tiles than 20
+            DataSaverMode.AGGRESSIVE -> 15 // minimum viable detail for navigation
+        }
+
         tileStore.getAllTileRegions { expected ->
             if (expected.isValue && expected.value?.any { it.id == routeId } == true) {
-                Log.d(TAG, "Rota já em cache: $routeId")
+                Log.d(TAG, "Corredor já em cache: $routeId")
                 return@getAllTileRegions
             }
 
@@ -714,7 +752,7 @@ class MapboxPlatformView(
                 TilesetDescriptorOptions.Builder()
                     .styleURI(NavigationStyles.NAVIGATION_DAY_STYLE)
                     .minZoom(13)
-                    .maxZoom(20)
+                    .maxZoom(maxZoom)
                     .build()
             )
 
@@ -727,7 +765,7 @@ class MapboxPlatformView(
                 .build()
 
             tileStore.loadTileRegion(routeId, options, { }, { expectedResult ->
-                if (expectedResult.isValue) Log.d(TAG, "Corredor da rota salvo offline.")
+                if (expectedResult.isValue) Log.d(TAG, "Corredor da rota salvo: $routeId (maxZoom=$maxZoom)")
             })
         }
     }
@@ -893,16 +931,18 @@ class MapboxPlatformView(
             return
         }
 
-        MapboxNavigationApp.setup(
-            NavigationOptions.Builder(context)
-                .routingTilesOptions(
-                    // Use the same TileStore so routing tiles downloaded offline are reused
-                    RoutingTilesOptions.Builder()
-                        .tileStore(tileStore)
-                        .build()
-                )
-                .build()
-        )
+        if (!MapboxNavigationApp.isSetup()) {
+            MapboxNavigationApp.setup(
+                NavigationOptions.Builder(context)
+                    .routingTilesOptions(
+                        // Use the same TileStore so routing tiles downloaded offline are reused
+                        RoutingTilesOptions.Builder()
+                            .tileStore(tileStore)
+                            .build()
+                    )
+                    .build()
+            )
+        }
         MapboxNavigationApp.attach(lifecycleHelper!!)
         mapboxNavigation = MapboxNavigationApp.current()
         if (mapboxNavigation == null) {
@@ -914,17 +954,16 @@ class MapboxPlatformView(
         viewportDataSource = MapboxNavigationViewportDataSource(_mapView!!.mapboxMap)
         viewportDataSource.options.apply {
             followingFrameOptions.apply {
-                defaultPitch = 45.0
                 minZoom = 13.0
-                maxZoom = 20.0
                 focalPoint = FollowingFrameOptions.FocalPoint(0.5, 1.0)
                 pitchNearManeuvers.enabled = true
             }
             overviewFrameOptions.apply {
-                maxZoom = 20.0
                 pitchUpdatesAllowed = true
             }
         }
+        // Apply mode-specific zoom and pitch after viewportDataSource is ready
+        applyMapDataSaverConfig()
 
         if (context.resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE) {
             viewportDataSource.overviewPadding = landscapeOverviewPadding
@@ -934,6 +973,10 @@ class MapboxPlatformView(
             viewportDataSource.followingPadding = followingPadding
         }
         navigationCamera = NavigationCamera(_mapView!!.mapboxMap, _mapView!!.camera, viewportDataSource)
+        // When actively following, lock pan so the SDK doesn't load tiles for areas off-route
+        navigationCamera!!.registerNavigationCameraStateChangeObserver { state ->
+            _mapView?.gestures?.scrollEnabled = (state != NavigationCameraState.FOLLOWING)
+        }
         routeLineApi = MapboxRouteLineApi(MapboxRouteLineApiOptions.Builder().build())
         routeLineView = MapboxRouteLineView(
             MapboxRouteLineViewOptions.Builder(context)
@@ -1095,18 +1138,37 @@ class MapboxPlatformView(
 
     private fun applyMapDataSaverConfig() {
         val map = _mapView?.mapboxMap ?: return
+        val vpOptions = if (::viewportDataSource.isInitialized) viewportDataSource.options else null
         when (dataSaverMode) {
             DataSaverMode.OFF -> {
-                map.setPrefetchZoomDelta(4)   // padrão SDK: antecipa 4 zoom levels
+                map.setPrefetchZoomDelta(4)
                 toggleTraffic(true)
+                vpOptions?.followingFrameOptions?.apply {
+                    defaultPitch = 45.0
+                    maxZoom = 20.0
+                }
+                vpOptions?.overviewFrameOptions?.maxZoom = 20.0
             }
             DataSaverMode.BALANCED -> {
-                map.setPrefetchZoomDelta(1)   // só 1 nível: menos tiles buscados
-                toggleTraffic(false)          // tráfego faz polling contínuo de dados
+                map.setPrefetchZoomDelta(1)
+                toggleTraffic(false)
+                vpOptions?.followingFrameOptions?.apply {
+                    // Zoom 17 at driving speed: sufficient detail, ~8x fewer tiles vs zoom 20
+                    maxZoom = 17.0
+                    // Higher pitch = narrower horizontal field = fewer tiles in viewport
+                    defaultPitch = 55.0
+                }
+                vpOptions?.overviewFrameOptions?.maxZoom = 16.0
             }
             DataSaverMode.AGGRESSIVE -> {
-                map.setPrefetchZoomDelta(0)   // apenas tiles visíveis agora
+                map.setPrefetchZoomDelta(0)
                 toggleTraffic(false)
+                vpOptions?.followingFrameOptions?.apply {
+                    // Zoom 16: still clearly legible for navigation, ~64x fewer tiles vs zoom 20
+                    maxZoom = 16.0
+                    defaultPitch = 65.0
+                }
+                vpOptions?.overviewFrameOptions?.maxZoom = 14.0
             }
         }
     }
@@ -1301,7 +1363,6 @@ class MapboxPlatformView(
             mapboxNavigation?.setNavigationRoutes(currentRoutes)
             navigationCamera?.requestNavigationCameraToFollowing()
             sendEvent("navigationStarted", null)
-            cacheRouteData(currentRoutes.first())
         }
     }
 
@@ -1372,5 +1433,12 @@ class MapboxPlatformView(
         lifecycleHelper = null
         mapView?.setViewTreeLifecycleOwner(null)
         Log.d(TAG, "MapboxPlatformView com ID $viewId descartada e recursos liberados.")
+    }
+
+    companion object {
+        // Singleton so all view instances (and recreations) share the same underlying store,
+        // preventing duplicate downloads and ensuring MapboxMapsOptions.tileStore always
+        // points to the same object across the app's lifetime.
+        val tileStore: TileStore by lazy { TileStore.create() }
     }
 }

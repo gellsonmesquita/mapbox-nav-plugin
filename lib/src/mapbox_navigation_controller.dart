@@ -222,6 +222,32 @@ class MapboxNavigationController extends ChangeNotifier {
     }
   }
 
+  Future<List<OfflineRegionInfo>> listOfflineRegions() async {
+    try {
+      final raw = await _methodChannel.invokeMethod<List<dynamic>>(
+        'listOfflineRegions',
+        {'viewId': _viewId},
+      );
+      return (raw ?? [])
+          .map((e) => OfflineRegionInfo.fromMap(Map<String, dynamic>.from(e as Map)))
+          .toList();
+    } on PlatformException catch (e) {
+      print("Falha ao listar regiões: ${e.message}");
+      return [];
+    }
+  }
+
+  Future<void> deleteRegion({required String region}) async {
+    try {
+      await _methodChannel.invokeMethod('deleteOfflineRegion', {
+        'region': region,
+        'viewId': _viewId,
+      });
+    } on PlatformException catch (e) {
+      print("Falha ao apagar região: ${e.message}");
+    }
+  }
+
   Future<void> stopNavigation() async {
     await _methodChannel.invokeMethod('stopNavigation', {
       'viewId': _viewId,
@@ -275,4 +301,41 @@ class MapboxNavigationController extends ChangeNotifier {
     _eventStreamController.close();
     super.dispose();
   }
+}
+
+class OfflineRegionInfo {
+  final String id;
+  final int completedBytes;
+  final int completedCount;
+  final int requiredCount;
+
+  const OfflineRegionInfo({
+    required this.id,
+    required this.completedBytes,
+    required this.completedCount,
+    required this.requiredCount,
+  });
+
+  factory OfflineRegionInfo.fromMap(Map<String, dynamic> map) {
+    return OfflineRegionInfo(
+      id: map['id'] as String,
+      completedBytes: (map['completedBytes'] as num).toInt(),
+      completedCount: (map['completedCount'] as num).toInt(),
+      requiredCount: (map['requiredCount'] as num).toInt(),
+    );
+  }
+
+  /// Tamanho formatado (ex: "245 MB")
+  String get formattedSize {
+    if (completedBytes < 1024 * 1024) {
+      return '${(completedBytes / 1024).toStringAsFixed(1)} KB';
+    }
+    return '${(completedBytes / (1024 * 1024)).toStringAsFixed(1)} MB';
+  }
+
+  /// Percentagem de completude (0.0 a 1.0)
+  double get completionRatio =>
+      requiredCount > 0 ? completedCount / requiredCount : 1.0;
+
+  bool get isComplete => completedCount >= requiredCount;
 }
