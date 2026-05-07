@@ -21,6 +21,7 @@ import com.mapbox.common.MapboxOptions
 import com.mapbox.common.TileRegionLoadOptions
 import com.mapbox.common.TileStore
 import com.mapbox.common.TileStoreOptions
+import com.mapbox.common.TelemetryUtils
 import com.mapbox.geojson.LineString
 import com.mapbox.geojson.Point
 import com.mapbox.geojson.Polygon
@@ -34,6 +35,7 @@ import com.mapbox.maps.MapOptions
 import com.mapbox.maps.MapView
 import com.mapbox.maps.OfflineManager
 import com.mapbox.maps.TilesetDescriptorOptions
+import com.mapbox.maps.StyleObjectInfo
 import com.mapbox.maps.TileStoreUsageMode
 import com.mapbox.maps.extension.style.layers.getLayer
 import com.mapbox.maps.plugin.animation.camera
@@ -133,7 +135,7 @@ class MapboxPlatformView(
     private var maxWeight: Double? = null
     private var maxWidth: Double? = null
     private var routeProfile = DirectionsCriteria.PROFILE_DRIVING
-    private var routeLanguage = "pt"
+    private var routeLanguage = "pt-PT"
     private var routeUnits = DirectionsCriteria.METRIC
     private var routeGeometryPrecision = DirectionsCriteria.GEOMETRY_POLYLINE
     private var routeOverview = DirectionsCriteria.OVERVIEW_FULL
@@ -354,7 +356,10 @@ class MapboxPlatformView(
     }
 
     private val voiceInstructionsPlayerCallback = MapboxNavigationConsumer<SpeechAnnouncement> { value ->
-        speechApi.clean(value)
+        // Only clean cloud TTS cache files — device TTS announcements have no cached audio file.
+        if (dataSaverMode == DataSaverMode.OFF) {
+            speechApi.clean(value)
+        }
     }
 
     init {
@@ -514,10 +519,11 @@ class MapboxPlatformView(
                 val east = (args?.get("east") as? Number)?.toDouble()
                 val south = (args?.get("south") as? Number)?.toDouble()
                 val west = (args?.get("west") as? Number)?.toDouble()
+                val maxZoom = (args?.get("maxZoom") as? Number)?.toInt() ?: 17
                 if (region == null || north == null || east == null || south == null || west == null) {
                     result.error("MISSING_ARG", "region, north, east, south and west are required", null)
                 } else {
-                    downloadRegionOffline(region, north, east, south, west)
+                    downloadRegionOffline(region, north, east, south, west, maxZoom)
                     result.success(null)
                 }
                 return true
@@ -738,8 +744,8 @@ class MapboxPlatformView(
 
         val maxZoom: Byte = when (dataSaverMode) {
             DataSaverMode.OFF -> 20
-            DataSaverMode.BALANCED -> 17  // sufficient for turn-by-turn, ~4x fewer tiles than 20
-            DataSaverMode.AGGRESSIVE -> 15 // minimum viable detail for navigation
+            DataSaverMode.BALANCED -> 17
+            DataSaverMode.AGGRESSIVE -> 15
         }
 
         tileStore.getAllTileRegions { expected ->
@@ -773,7 +779,10 @@ class MapboxPlatformView(
     @SuppressLint("MissingPermission")
     private fun initMapView() {
         val glyphsOptions = GlyphsRasterizationOptions.Builder()
-            .rasterizationMode(GlyphsRasterizationMode.IDEOGRAPHS_RASTERIZED_LOCALLY)
+            // ALL_GLYPHS: renders ALL text (including Portuguese street names) using device fonts.
+            // Eliminates network requests to api.mapbox.com/fonts/v1/... for every tile render.
+            // IDEOGRAPHS mode only covers CJK text — Latin script still fetched from network.
+            .rasterizationMode(GlyphsRasterizationMode.ALL_GLYPHS_RASTERIZED_LOCALLY)
             .build()
         val mapOptions = MapOptions.Builder()
             .glyphsRasterizationOptions(glyphsOptions)
@@ -795,10 +804,15 @@ class MapboxPlatformView(
         _mapView?.mapboxMap?.loadStyle(NavigationStyles.NAVIGATION_DAY_STYLE) { style ->
             _mapView?.mapboxMap?.setCamera(
                 CameraOptions.Builder()
-                    .zoom(18.0)
+                    .zoom(15.0)
                     .build()
             )
+            val sourceIds = style.styleSources.map { it.id }
+            Log.d(TAG, "Style sources loaded: $sourceIds")
             applyMapDataSaverConfig()
+            if (dataSaverMode != DataSaverMode.OFF) {
+                removeRealtimeSources(style)
+            }
             _mapView?.logo?.enabled = false
             _mapView?.attribution?.enabled = false
             _mapView?.location?.apply {
@@ -862,7 +876,7 @@ class MapboxPlatformView(
         mapView?.setViewTreeLifecycleOwner(lifecycleHelper)
     }
 
-    fun downloadRegionOffline(region: String, north: Double, east: Double, south: Double, west: Double) {
+    fun downloadRegionOffline(region: String, north: Double, east: Double, south: Double, west: Double, maxZoom: Int = 17) {
 
         tileStore.getAllTileRegions { expected ->
             if (expected.isValue) {
@@ -885,11 +899,12 @@ class MapboxPlatformView(
             )
             val areaGeometry = Polygon.fromLngLats(coordinates)
 
+            val clampedMaxZoom: Byte = maxZoom.coerceIn(13, 20).toByte()
             val mapTilesetDescriptor = offlineManager.createTilesetDescriptor(
                 TilesetDescriptorOptions.Builder()
                     .styleURI(NavigationStyles.NAVIGATION_DAY_STYLE)
                     .minZoom(13)
-                    .maxZoom(20)
+                    .maxZoom(clampedMaxZoom)
                     .build()
             )
             // Routing tiles: enable offline route calculation within this region (no Directions API call)
@@ -943,6 +958,11 @@ class MapboxPlatformView(
                     .build()
             )
         }
+        // Re-apply after setup: MapboxNavigationApp.setup() may internally re-enable telemetry,
+        // overriding the earlier setEventsCollectionState(false) call in applyMapDataSaverConfig().
+        if (dataSaverMode != DataSaverMode.OFF) {
+            TelemetryUtils.setEventsCollectionState(false) {}
+        }
         MapboxNavigationApp.attach(lifecycleHelper!!)
         mapboxNavigation = MapboxNavigationApp.current()
         if (mapboxNavigation == null) {
@@ -992,8 +1012,8 @@ class MapboxPlatformView(
                 .estimatedTimeToArrivalFormatter(EstimatedTimeToArrivalFormatter(context))
                 .build()
         )
-        speechApi = MapboxSpeechApi(context, Locale.forLanguageTag("PT").language)
-        voiceInstructionsPlayer = MapboxVoiceInstructionsPlayer(context, Locale.US.language)
+        speechApi = MapboxSpeechApi(context, routeLanguage)
+        voiceInstructionsPlayer = MapboxVoiceInstructionsPlayer(context, routeLanguage)
 
         mapboxNavigation?.registerRoutesObserver(routesObserver)
         mapboxNavigation?.registerLocationObserver(locationObserver)
@@ -1018,8 +1038,11 @@ class MapboxPlatformView(
                         if (dataSaverMode == DataSaverMode.OFF) routeGeometryPrecision
                         else DirectionsCriteria.GEOMETRY_POLYLINE
                     )
-                    .steps(dataSaverMode != DataSaverMode.AGGRESSIVE)
-                    .voiceInstructions(dataSaverMode == DataSaverMode.OFF)
+                    // steps=true always required: Navigation SDK v3 mandates step data.
+                    .steps(true)
+                    // voice_instructions=true always required: announcement() text comes from route;
+                    // without it device TTS has nothing to speak after reroute.
+                    .voiceInstructions(true)
                     .build()
             }
         })
@@ -1096,7 +1119,9 @@ class MapboxPlatformView(
                     ))
                     if (isDestinationChange || pendingStartNavigation) {
                         pendingStartNavigation = false
-                        setRouteAndStartNavigation()
+                        // Pass validRoutes directly: routesObserver may fire async so
+                        // routeLineApi.getNavigationRoutes() could still be empty here.
+                        setRouteAndStartNavigation(validRoutes)
                         if (behaviorPolicy.autoFollowOnDestinationChange) {
                             navigationCamera?.requestNavigationCameraToFollowing()
                         }
@@ -1117,13 +1142,13 @@ class MapboxPlatformView(
             return
         }
 
-        if (currentDirectionsRoute == null) {
+        if (currentDirectionsRoute == null || routeLineApi.getNavigationRoutes().isEmpty()) {
             if (origin == null || destination == null || origin.size != 2 || destination.size != 2) {
                 Log.e(TAG, "Origem ou destino inválido: origin=$origin, destination=$destination")
                 sendEvent("error", mapOf("message" to "Origem ou destino inválido. Devem conter exatamente [latitude, longitude]."))
                 return
             }
-            Log.d(TAG, "Rota não existe, tentando criar antes de iniciar a navegação.")
+            Log.d(TAG, "Rota não existe ou routeLineApi vazio, criando rota antes de iniciar.")
             pendingStartNavigation = true
             createRoute(origin, destination, waypoints)
             return
@@ -1134,6 +1159,13 @@ class MapboxPlatformView(
     }
 
     private fun applyMapDataSaverConfig() {
+        // Telemetry applies regardless of map initialisation state.
+        when (dataSaverMode) {
+            DataSaverMode.OFF -> TelemetryUtils.setEventsCollectionState(true) {}
+            DataSaverMode.BALANCED,
+            DataSaverMode.AGGRESSIVE -> TelemetryUtils.setEventsCollectionState(false) {}
+        }
+
         val map = _mapView?.mapboxMap ?: return
         val vpOptions = if (::viewportDataSource.isInitialized) viewportDataSource.options else null
         when (dataSaverMode) {
@@ -1147,21 +1179,18 @@ class MapboxPlatformView(
                 vpOptions?.overviewFrameOptions?.maxZoom = 20.0
             }
             DataSaverMode.BALANCED -> {
-                map.setPrefetchZoomDelta(1)
+                map.setPrefetchZoomDelta(0)
                 toggleTraffic(false)
                 vpOptions?.followingFrameOptions?.apply {
-                    // Zoom 17 at driving speed: sufficient detail, ~8x fewer tiles vs zoom 20
                     maxZoom = 17.0
-                    // Higher pitch = narrower horizontal field = fewer tiles in viewport
-                    defaultPitch = 55.0
+                    defaultPitch = 60.0
                 }
-                vpOptions?.overviewFrameOptions?.maxZoom = 16.0
+                vpOptions?.overviewFrameOptions?.maxZoom = 14.0
             }
             DataSaverMode.AGGRESSIVE -> {
                 map.setPrefetchZoomDelta(0)
                 toggleTraffic(false)
                 vpOptions?.followingFrameOptions?.apply {
-                    // Zoom 16: still clearly legible for navigation, ~64x fewer tiles vs zoom 20
                     maxZoom = 16.0
                     defaultPitch = 65.0
                 }
@@ -1172,12 +1201,34 @@ class MapboxPlatformView(
 
     fun toggleTraffic(show: Boolean) {
         _mapView?.mapboxMap?.getStyle() { style ->
-            style.getLayer("traffic")?.apply {
-                visibility(if (show) Visibility.VISIBLE else Visibility.NONE)
-            }
+            val visibility = if (show) Visibility.VISIBLE else Visibility.NONE
+            // Navigation Day Style uses several traffic layers (traffic-low, traffic-moderate,
+            // traffic-heavy, traffic-severe, etc.). Iterate all and hide/show by name match.
+            style.styleLayers
+                .filter { it.id.contains("traffic", ignoreCase = true) }
+                .forEach { layerInfo -> style.getLayer(layerInfo.id)?.visibility(visibility) }
         }
     }
 
+    private val realtimeSourceKeywords = listOf("traffic", "incident", "hazard", "event", "congestion")
+
+    private fun removeRealtimeSources(style: com.mapbox.maps.Style) {
+        // Identify real-time sources by keyword match and log them for debugging.
+        val realtimeSources = style.styleSources
+            .map { it.id }
+            .filter { id -> realtimeSourceKeywords.any { keyword -> id.contains(keyword, ignoreCase = true) } }
+        Log.d(TAG, "Removing real-time sources: $realtimeSources")
+
+        // Layers must be removed before their source can be removed.
+        style.styleLayers
+            .filter { layer -> realtimeSourceKeywords.any { kw -> layer.id.contains(kw, ignoreCase = true) } }
+            .forEach { style.removeStyleLayer(it.id) }
+
+        realtimeSources.forEach { style.removeStyleSource(it) }
+    }
+
+    // Keep for backward compat with toggleTraffic which still uses it during OFF mode.
+    private fun removeTrafficSource(style: com.mapbox.maps.Style) = removeRealtimeSources(style)
 
     @RequiresPermission(allOf = [Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION])
     fun changeDestination(origin: List<Double>?, newDestination: List<Double>) {
@@ -1238,8 +1289,6 @@ class MapboxPlatformView(
             }
         }
         val (effectiveOverview, effectiveAnnotations) = resolveOverviewAndAnnotations(preferredOverview)
-        val emitSteps = dataSaverMode != DataSaverMode.AGGRESSIVE
-        val emitVoiceInstructions = dataSaverMode == DataSaverMode.OFF
 
         val optionsBuilder = RouteOptions.builder()
             .applyDefaultNavigationOptions()
@@ -1250,8 +1299,14 @@ class MapboxPlatformView(
             .geometries(effectiveGeometry)
             .overview(effectiveOverview)
             .annotationsList(effectiveAnnotations)
-            .steps(emitSteps)
-            .voiceInstructions(emitVoiceInstructions)
+            // steps=true is always required: Navigation SDK v3 cannot parse routes without step
+            // data, and applyDefaultNavigationOptions() sets banner_instructions=true which also
+            // mandates steps. Setting steps=false causes "Leg is missing 'steps' field" failure.
+            .steps(true)
+            // voice_instructions=true is always required: even when using device TTS the
+            // announcement text comes from the route response — without it announcement() is null.
+            // Data saving comes from using device TTS instead of cloud TTS, not from omitting text.
+            .voiceInstructions(true)
             .alternatives(allowAlternatives)
             .enableRefresh(enableRouteRefresh)
 
@@ -1349,8 +1404,10 @@ class MapboxPlatformView(
     }
 
     @RequiresPermission(allOf = [Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION])
-    private fun setRouteAndStartNavigation() {
-        val currentRoutes = routeLineApi.getNavigationRoutes()
+    private fun setRouteAndStartNavigation(routes: List<NavigationRoute>? = null) {
+        // Prefer explicitly-passed routes (avoids race with routeLineApi async update).
+        // Fall back to routeLineApi only when called from startNavigation with an existing route.
+        val currentRoutes = routes ?: routeLineApi.getNavigationRoutes()
         if (currentRoutes.isNotEmpty()) {
             if (!isTripSessionActive) {
                 mapboxNavigation?.startTripSession()

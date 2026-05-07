@@ -9,7 +9,7 @@ object MapboxConfig {
     const val CAR_CONTEXT_MODE = "SHARED"
     const val DEFAULT_ZOOM_LEVEL = 15.0
     // Navigation Configuration
-    const val DEFAULT_LANGUAGE = "en"
+    const val DEFAULT_LANGUAGE = "pt-PT"
     const val DEFAULT_VOICE_UNITS = "imperial"
 
     // Data usage defaults (balanced mode by default to reduce network traffic).

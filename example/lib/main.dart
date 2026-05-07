@@ -227,11 +227,11 @@ class _NavigationScreenState extends State<NavigationScreen> {
       _downloadStatus = 'Baixando...';
     });
     await _controller!.downloadRegion(
-      region: 'LuandaCentro',
-      north: -8.810,
-      east: 13.235,
-      south: -8.820,
-      west: 13.225,
+      region: 'fff',
+      north: -9.423587,
+      east: 12.783966,
+      south: -8.396327,
+      west: 14.414062,
     );
   }
 

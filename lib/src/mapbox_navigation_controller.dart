@@ -207,6 +207,7 @@ class MapboxNavigationController extends ChangeNotifier {
     required double east,
     required double south,
     required double west,
+    int maxZoom = 17,
   }) async {
     try {
       await _methodChannel.invokeMethod('downloadOfflineArea', {
@@ -215,7 +216,8 @@ class MapboxNavigationController extends ChangeNotifier {
         'east': east,
         'south': south,
         'west': west,
-        'viewId': _viewId
+        'maxZoom': maxZoom,
+        'viewId': _viewId,
       });
     } on PlatformException catch (e) {
       print("Falha ao iniciar download: ${e.message}");
