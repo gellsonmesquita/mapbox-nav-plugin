@@ -168,6 +168,9 @@ class MapboxPlatformView(
     private val offlineProgressLimiterByRegion = mutableMapOf<String, EventRateLimiter>()
     private val lastOfflineProgressPercentByRegion = mutableMapOf<String, Double>()
     private var pendingStartNavigation = false
+    // Reference counter: network stays ON while any download is in progress.
+    // Prevents race conditions when route calculation and cacheRouteData overlap.
+    private val networkRefCount = java.util.concurrent.atomic.AtomicInteger(0)
     private var isTripSessionActive = false
     private var isVoiceInstructionsMuted = false
         set(value) {
@@ -735,18 +738,10 @@ class MapboxPlatformView(
     }
 
     private fun cacheRouteData(navigationRoute: NavigationRoute) {
-        // Always cache the route corridor so tiles are served locally during navigation and reroutes.
-        // Zoom range adapts to mode: less detail = fewer bytes, but always enough to navigate.
         if (dataSaverMode == DataSaverMode.AGGRESSIVE && !isWifiConnected) return
 
         val geometryStr = navigationRoute.directionsRoute.geometry() ?: return
         val routeId = "route_cache_${navigationRoute.directionsRoute.hashCode()}"
-
-        val maxZoom: Byte = when (dataSaverMode) {
-            DataSaverMode.OFF -> 20
-            DataSaverMode.BALANCED -> 17
-            DataSaverMode.AGGRESSIVE -> 15
-        }
 
         tileStore.getAllTileRegions { expected ->
             if (expected.isValue && expected.value?.any { it.id == routeId } == true) {
@@ -754,24 +749,38 @@ class MapboxPlatformView(
                 return@getAllTileRegions
             }
 
-            val tilesetDescriptor = offlineManager.createTilesetDescriptor(
-                TilesetDescriptorOptions.Builder()
-                    .styleURI(NavigationStyles.NAVIGATION_DAY_STYLE)
-                    .minZoom(13)
-                    .maxZoom(maxZoom)
-                    .build()
-            )
-
             val routeGeometry = LineString.fromPolyline(geometryStr, 6)
+
+            // In BALANCED/AGGRESSIVE: download only routing tiles (1–5 MB) — used for offline
+            // rerouting along the corridor. Map tiles (10–50 MB) are skipped because:
+            //   • Within a downloaded region: already present, deduplication = 0 MB.
+            //   • Outside a downloaded region: map renders blank but navigation still works.
+            // In OFF mode: also include map tiles for full visual fidelity.
+            val mapDescriptor = if (dataSaverMode == DataSaverMode.OFF) {
+                offlineManager.createTilesetDescriptor(
+                    TilesetDescriptorOptions.Builder()
+                        .styleURI(NavigationStyles.NAVIGATION_DAY_STYLE)
+                        .minZoom(13)
+                        .maxZoom(20)
+                        .build()
+                )
+            } else null
+
+            val routingDescriptor = mapboxNavigation?.tilesetDescriptorFactory?.getLatest()
+
+            val descriptors = listOfNotNull(mapDescriptor, routingDescriptor)
+            if (descriptors.isEmpty()) return@getAllTileRegions
 
             val options = TileRegionLoadOptions.Builder()
                 .geometry(routeGeometry)
-                .descriptors(listOf(tilesetDescriptor))
+                .descriptors(descriptors)
                 .acceptExpired(true)
                 .build()
 
+            acquireNetwork()
             tileStore.loadTileRegion(routeId, options, { }, { expectedResult ->
-                if (expectedResult.isValue) Log.d(TAG, "Corredor da rota salvo: $routeId (maxZoom=$maxZoom)")
+                releaseNetwork()
+                if (expectedResult.isValue) Log.d(TAG, "Corredor da rota salvo: $routeId (modo=$dataSaverMode)")
             })
         }
     }
@@ -880,12 +889,13 @@ class MapboxPlatformView(
     }
 
     fun downloadRegionOffline(region: String, north: Double, east: Double, south: Double, west: Double, maxZoom: Int = 17) {
-        setMapboxNetwork(true)
+        acquireNetwork()
         tileStore.getAllTileRegions { expected ->
             if (expected.isValue) {
                 val existingRegions = expected.value ?: emptyList()
                 if (existingRegions.any { it.id == region }) {
                     Log.d(TAG, "A região $region já está baixada. Ignorando download.")
+                    releaseNetwork()
                     sendEvent("offlineDownloadComplete", mapOf("id" to region, "status" to "already_exists"))
                     return@getAllTileRegions
                 }
@@ -930,7 +940,7 @@ class MapboxPlatformView(
                     }
                 },
                 { expected ->
-                    setMapboxNetwork(false)
+                    releaseNetwork()
                     if (expected.isError) {
                         Log.e(TAG, "Erro no download de $region: ${expected.error}")
                         sendEvent("error", mapOf("message" to expected.error.toString()))
@@ -1088,18 +1098,17 @@ class MapboxPlatformView(
             return
         }
         routeRequestGate.markInFlight(routeSignature)
-        // Enable network temporarily for the Directions API call, disable after response.
-        if (dataSaverMode != DataSaverMode.OFF) setMapboxNetwork(true)
+        acquireNetwork()
 
         mapboxNavigation?.requestRoutes(options, object : NavigationRouterCallback {
             override fun onCanceled(routeOptions: RouteOptions, routerOrigin: String) {
-                if (dataSaverMode != DataSaverMode.OFF) setMapboxNetwork(false)
+                releaseNetwork()
                 routeRequestGate.clearInFlight()
                 pendingStartNavigation = false
                 sendEvent("routeCanceled", null)
             }
             override fun onFailure(reasons: List<RouterFailure>, routeOptions: RouteOptions) {
-                if (dataSaverMode != DataSaverMode.OFF) setMapboxNetwork(false)
+                releaseNetwork()
                 routeRequestGate.clearInFlight()
                 pendingStartNavigation = false
                 val message = reasons.joinToString(", ") { it.message }
@@ -1107,7 +1116,7 @@ class MapboxPlatformView(
             }
 
             override fun onRoutesReady(routes: List<NavigationRoute>, routerOrigin: String) {
-                if (dataSaverMode != DataSaverMode.OFF) setMapboxNetwork(false)
+                releaseNetwork()
                 routeRequestGate.clearInFlight()
                 val validRoutes = routes.filter { !isRouteInForbiddenZone(it.directionsRoute) }
                 if (validRoutes.isNotEmpty()) {
@@ -1165,6 +1174,22 @@ class MapboxPlatformView(
     private fun setMapboxNetwork(connected: Boolean) {
         OfflineSwitch.getInstance().setMapboxStackConnected(connected)
         Log.d(TAG, "Mapbox network: ${if (connected) "ON" else "OFF"}")
+    }
+
+    // Increment reference count — network turns ON on first acquire.
+    private fun acquireNetwork() {
+        if (dataSaverMode == DataSaverMode.OFF) return
+        if (networkRefCount.incrementAndGet() == 1) setMapboxNetwork(true)
+        Log.d(TAG, "acquireNetwork refs=${networkRefCount.get()}")
+    }
+
+    // Decrement reference count — network turns OFF when last release is called.
+    private fun releaseNetwork() {
+        if (dataSaverMode == DataSaverMode.OFF) return
+        val refs = networkRefCount.decrementAndGet().coerceAtLeast(0)
+        networkRefCount.set(refs)
+        if (refs == 0) setMapboxNetwork(false)
+        Log.d(TAG, "releaseNetwork refs=$refs")
     }
 
     private fun applyMapDataSaverConfig() {
@@ -1336,8 +1361,10 @@ class MapboxPlatformView(
 
         val defaultAnnotations = when (dataSaverMode) {
             DataSaverMode.OFF -> listOf("duration", "distance", "speed", "congestion_numeric", "maxspeed")
+            // congestion_numeric omitted: traffic layers are removed in these modes,
+            // so the per-coordinate congestion data is downloaded but never rendered.
             DataSaverMode.BALANCED, DataSaverMode.AGGRESSIVE ->
-                listOf("duration", "distance", "speed", "congestion_numeric")
+                listOf("duration", "distance", "speed")
         }
 
         val hasCustomAnnotations = normalizedCustomAnnotations != null
