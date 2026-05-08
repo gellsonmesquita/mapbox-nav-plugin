@@ -778,10 +778,21 @@ class MapboxPlatformView(
                 .build()
 
             acquireNetwork()
-            tileStore.loadTileRegion(routeId, options, { }, { expectedResult ->
-                releaseNetwork()
-                if (expectedResult.isValue) Log.d(TAG, "Corredor da rota salvo: $routeId (modo=$dataSaverMode)")
-            })
+            Log.d(TAG, "cacheRouteData START modo=$dataSaverMode descritores=${descriptors.size}")
+            tileStore.loadTileRegion(routeId, options,
+                { progress ->
+                    Log.d(TAG, "cacheRouteData PROGRESS tiles=${progress.completedResourceCount}/${progress.requiredResourceCount} bytes=${progress.completedResourceSize}/${progress.requiredResourceSize}")
+                },
+                { expectedResult ->
+                    releaseNetwork()
+                    if (expectedResult.isValue) {
+                        val region = expectedResult.value!!
+                        Log.d(TAG, "cacheRouteData DONE tiles=${region.completedResourceCount} bytes=${region.completedResourceSize} modo=$dataSaverMode")
+                    } else {
+                        Log.e(TAG, "cacheRouteData ERRO ${expectedResult.error}")
+                    }
+                }
+            )
         }
     }
 
