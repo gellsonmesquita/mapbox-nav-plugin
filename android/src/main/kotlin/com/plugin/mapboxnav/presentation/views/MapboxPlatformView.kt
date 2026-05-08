@@ -21,7 +21,7 @@ import com.mapbox.common.MapboxOptions
 import com.mapbox.common.TileRegionLoadOptions
 import com.mapbox.common.TileStore
 import com.mapbox.common.TileStoreOptions
-import com.mapbox.common.TelemetryUtils
+import com.mapbox.common.OfflineSwitch
 import com.mapbox.geojson.LineString
 import com.mapbox.geojson.Point
 import com.mapbox.geojson.Polygon
@@ -812,6 +812,9 @@ class MapboxPlatformView(
             applyMapDataSaverConfig()
             if (dataSaverMode != DataSaverMode.OFF) {
                 removeRealtimeSources(style)
+                // Style is cached — disable all Mapbox network access.
+                // Network is re-enabled only for route requests and region downloads.
+                setMapboxNetwork(false)
             }
             _mapView?.logo?.enabled = false
             _mapView?.attribution?.enabled = false
@@ -877,7 +880,7 @@ class MapboxPlatformView(
     }
 
     fun downloadRegionOffline(region: String, north: Double, east: Double, south: Double, west: Double, maxZoom: Int = 17) {
-
+        setMapboxNetwork(true)
         tileStore.getAllTileRegions { expected ->
             if (expected.isValue) {
                 val existingRegions = expected.value ?: emptyList()
@@ -927,6 +930,7 @@ class MapboxPlatformView(
                     }
                 },
                 { expected ->
+                    setMapboxNetwork(false)
                     if (expected.isError) {
                         Log.e(TAG, "Erro no download de $region: ${expected.error}")
                         sendEvent("error", mapOf("message" to expected.error.toString()))
@@ -957,11 +961,6 @@ class MapboxPlatformView(
                     )
                     .build()
             )
-        }
-        // Re-apply after setup: MapboxNavigationApp.setup() may internally re-enable telemetry,
-        // overriding the earlier setEventsCollectionState(false) call in applyMapDataSaverConfig().
-        if (dataSaverMode != DataSaverMode.OFF) {
-            TelemetryUtils.setEventsCollectionState(false) {}
         }
         MapboxNavigationApp.attach(lifecycleHelper!!)
         mapboxNavigation = MapboxNavigationApp.current()
@@ -1089,14 +1088,18 @@ class MapboxPlatformView(
             return
         }
         routeRequestGate.markInFlight(routeSignature)
+        // Enable network temporarily for the Directions API call, disable after response.
+        if (dataSaverMode != DataSaverMode.OFF) setMapboxNetwork(true)
 
         mapboxNavigation?.requestRoutes(options, object : NavigationRouterCallback {
             override fun onCanceled(routeOptions: RouteOptions, routerOrigin: String) {
+                if (dataSaverMode != DataSaverMode.OFF) setMapboxNetwork(false)
                 routeRequestGate.clearInFlight()
                 pendingStartNavigation = false
                 sendEvent("routeCanceled", null)
             }
             override fun onFailure(reasons: List<RouterFailure>, routeOptions: RouteOptions) {
+                if (dataSaverMode != DataSaverMode.OFF) setMapboxNetwork(false)
                 routeRequestGate.clearInFlight()
                 pendingStartNavigation = false
                 val message = reasons.joinToString(", ") { it.message }
@@ -1104,6 +1107,7 @@ class MapboxPlatformView(
             }
 
             override fun onRoutesReady(routes: List<NavigationRoute>, routerOrigin: String) {
+                if (dataSaverMode != DataSaverMode.OFF) setMapboxNetwork(false)
                 routeRequestGate.clearInFlight()
                 val validRoutes = routes.filter { !isRouteInForbiddenZone(it.directionsRoute) }
                 if (validRoutes.isNotEmpty()) {
@@ -1158,14 +1162,12 @@ class MapboxPlatformView(
         Log.d(TAG, "Navegação iniciada.")
     }
 
-    private fun applyMapDataSaverConfig() {
-        // Telemetry applies regardless of map initialisation state.
-        when (dataSaverMode) {
-            DataSaverMode.OFF -> TelemetryUtils.setEventsCollectionState(true) {}
-            DataSaverMode.BALANCED,
-            DataSaverMode.AGGRESSIVE -> TelemetryUtils.setEventsCollectionState(false) {}
-        }
+    private fun setMapboxNetwork(connected: Boolean) {
+        OfflineSwitch.getInstance().setMapboxStackConnected(connected)
+        Log.d(TAG, "Mapbox network: ${if (connected) "ON" else "OFF"}")
+    }
 
+    private fun applyMapDataSaverConfig() {
         val map = _mapView?.mapboxMap ?: return
         val vpOptions = if (::viewportDataSource.isInitialized) viewportDataSource.options else null
         when (dataSaverMode) {
