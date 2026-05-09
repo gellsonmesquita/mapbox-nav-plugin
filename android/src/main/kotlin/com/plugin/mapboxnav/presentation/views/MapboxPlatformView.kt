@@ -174,6 +174,8 @@ class MapboxPlatformView(
     // Reference counter: network stays ON while any download is in progress.
     // Prevents race conditions when route calculation and cacheRouteData overlap.
     private val networkRefCount = java.util.concurrent.atomic.AtomicInteger(0)
+    // Prevents duplicate acquires across reroute retries; released in routesObserver or cancelNavigation.
+    private val rerouteNetworkAcquired = java.util.concurrent.atomic.AtomicBoolean(false)
     private var isTripSessionActive = false
     private var isVoiceInstructionsMuted = false
         set(value) {
@@ -222,6 +224,11 @@ class MapboxPlatformView(
     }
 
     private val routesObserver = RoutesObserver { routeUpdateResult ->
+        // Release network if an automatic reroute was in progress (acquire done in onRouteOptions).
+        if (rerouteNetworkAcquired.getAndSet(false)) {
+            releaseNetwork()
+            Log.d(TAG, "Reroute: rede libertada")
+        }
         if (routeUpdateResult.navigationRoutes.isNotEmpty()) {
             val primaryRoute = routeUpdateResult.navigationRoutes.first()
             currentDirectionsRoute = primaryRoute.directionsRoute
@@ -1023,8 +1030,11 @@ class MapboxPlatformView(
         viewportDataSource.options.apply {
             followingFrameOptions.apply {
                 minZoom = 16.0
-                focalPoint = FollowingFrameOptions.FocalPoint(0.5, 1.0)
+                // 0.75 keeps the puck in the lower third without pushing it to the edge (which
+                // combined with high pitch made the view look "from the side").
+                focalPoint = FollowingFrameOptions.FocalPoint(0.5, 0.75)
                 pitchNearManeuvers.enabled = true
+                bearingUpdatesAllowed = true
             }
             overviewFrameOptions.apply {
                 pitchUpdatesAllowed = true
@@ -1069,6 +1079,11 @@ class MapboxPlatformView(
         mapboxNavigation?.registerVoiceInstructionsObserver(voiceInstructionsObserver)
         mapboxNavigation?.setRerouteOptionsAdapter(object : RerouteOptionsAdapter {
             override fun onRouteOptions(routeOptions: RouteOptions): RouteOptions {
+                // compareAndSet: only first call per reroute acquires network (SDK may retry).
+                if (rerouteNetworkAcquired.compareAndSet(false, true)) {
+                    acquireNetwork()
+                    Log.d(TAG, "Reroute: rede adquirida")
+                }
                 val preferredOverview = when (dataSaverMode) {
                     DataSaverMode.OFF -> routeOverview
                     DataSaverMode.BALANCED, DataSaverMode.AGGRESSIVE -> {
@@ -1239,7 +1254,7 @@ class MapboxPlatformView(
                 map.setPrefetchZoomDelta(4)
                 toggleTraffic(true)
                 vpOptions?.followingFrameOptions?.apply {
-                    defaultPitch = 50.0
+                    defaultPitch = 45.0
                     maxZoom = 20.0
                 }
                 vpOptions?.overviewFrameOptions?.maxZoom = 20.0
@@ -1249,7 +1264,7 @@ class MapboxPlatformView(
                 toggleTraffic(false)
                 vpOptions?.followingFrameOptions?.apply {
                     maxZoom = 18.0
-                    defaultPitch = 55.0
+                    defaultPitch = 40.0
                 }
                 vpOptions?.overviewFrameOptions?.maxZoom = 14.0
             }
@@ -1258,7 +1273,7 @@ class MapboxPlatformView(
                 toggleTraffic(false)
                 vpOptions?.followingFrameOptions?.apply {
                     maxZoom = 17.0
-                    defaultPitch = 55.0
+                    defaultPitch = 40.0
                 }
                 vpOptions?.overviewFrameOptions?.maxZoom = 14.0
             }
@@ -1311,6 +1326,7 @@ class MapboxPlatformView(
 
     fun cancelNavigation() {
         pendingStartNavigation = false
+        if (rerouteNetworkAcquired.getAndSet(false)) releaseNetwork()
         if (isTripSessionActive) {
             mapboxNavigation?.stopTripSession()
             isTripSessionActive = false
