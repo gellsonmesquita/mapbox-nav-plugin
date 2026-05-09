@@ -781,7 +781,7 @@ class MapboxPlatformView(
             Log.d(TAG, "cacheRouteData START modo=$dataSaverMode descritores=${descriptors.size}")
             tileStore.loadTileRegion(routeId, options,
                 { progress ->
-                    Log.d(TAG, "cacheRouteData PROGRESS tiles=${progress.completedResourceCount}/${progress.requiredResourceCount} bytes=${progress.completedResourceSize}/${progress.requiredResourceSize}")
+                    Log.d(TAG, "cacheRouteData PROGRESS tiles=${progress.completedResourceCount}/${progress.requiredResourceCount} bytes=${progress.completedResourceSize}/${progress}")
                 },
                 { expectedResult ->
                     releaseNetwork()
