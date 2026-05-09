@@ -43,6 +43,9 @@ import com.mapbox.maps.plugin.attribution.attribution
 import com.mapbox.maps.plugin.gestures.gestures
 import com.mapbox.maps.plugin.locationcomponent.createDefault2DPuck
 import com.mapbox.maps.plugin.locationcomponent.location
+import com.mapbox.maps.plugin.LocationPuck2D
+import com.mapbox.maps.plugin.PuckBearing
+import com.mapbox.maps.ImageHolder
 import com.mapbox.maps.plugin.logo.logo
 import com.mapbox.navigation.base.ExperimentalPreviewMapboxNavigationAPI
 import com.mapbox.navigation.base.extensions.applyDefaultNavigationOptions
@@ -771,9 +774,17 @@ class MapboxPlatformView(
             val descriptors = listOfNotNull(mapDescriptor, routingDescriptor)
             if (descriptors.isEmpty()) return@getAllTileRegions
 
+            // BALANCED: only allow corridor download on Wi-Fi (DISALLOW_EXPENSIVE blocks mobile data).
+            // AGGRESSIVE already returns early when not on Wi-Fi via the check at the top.
+            val networkRestriction = if (dataSaverMode == DataSaverMode.BALANCED)
+                com.mapbox.common.NetworkRestriction.DISALLOW_EXPENSIVE
+            else
+                com.mapbox.common.NetworkRestriction.NONE
+
             val options = TileRegionLoadOptions.Builder()
                 .geometry(routeGeometry)
                 .descriptors(descriptors)
+                .networkRestriction(networkRestriction)
                 .acceptExpired(true)
                 .build()
 
@@ -824,7 +835,7 @@ class MapboxPlatformView(
         _mapView?.mapboxMap?.loadStyle(NavigationStyles.NAVIGATION_DAY_STYLE) { style ->
             _mapView?.mapboxMap?.setCamera(
                 CameraOptions.Builder()
-                    .zoom(15.0)
+                    .zoom(17.0)
                     .build()
             )
             val sourceIds = style.styleSources.map { it.id }
@@ -832,15 +843,32 @@ class MapboxPlatformView(
             applyMapDataSaverConfig()
             if (dataSaverMode != DataSaverMode.OFF) {
                 removeRealtimeSources(style)
-                // Style is cached — disable all Mapbox network access.
-                // Network is re-enabled only for route requests and region downloads.
-                setMapboxNetwork(false)
+                // Only disable network if the user has downloaded regions.
+                // Without downloaded regions the map would be blank (no tiles in TileStore).
+                tileStore.getAllTileRegions { expected ->
+                    val hasRegions = expected.isValue && expected.value?.isNotEmpty() == true
+                    if (hasRegions) {
+                        setMapboxNetwork(false)
+                        Log.d(TAG, "Regioes encontradas — rede desligada (modo offline)")
+                    } else {
+                        Log.d(TAG, "Sem regioes baixadas — rede mantida activa")
+                    }
+                }
             }
             _mapView?.logo?.enabled = false
             _mapView?.attribution?.enabled = false
             _mapView?.location?.apply {
                 setLocationProvider(navigationLocationProvider)
-                locationPuck = createDefault2DPuck(true)
+                // mapbox_navigation_puck_icon2 is the official Mapbox Navigation SDK puck:
+                // a large, visible navigation arrow with shadow, identical to the Mapbox
+                // navigation app. Rotates with COURSE (direction of movement, not compass).
+                locationPuck = LocationPuck2D(
+                    bearingImage = ImageHolder.from(com.plugin.mapboxnav.R.drawable.nav_puck_icon),
+                    shadowImage = ImageHolder.from(
+                        com.mapbox.navigation.ui.maps.R.drawable.mapbox_navigation_puck_icon2_shadow
+                    )
+                )
+                puckBearing = PuckBearing.COURSE
                 enabled = true
                 puckBearingEnabled = true
             }
@@ -994,7 +1022,7 @@ class MapboxPlatformView(
         viewportDataSource = MapboxNavigationViewportDataSource(_mapView!!.mapboxMap)
         viewportDataSource.options.apply {
             followingFrameOptions.apply {
-                minZoom = 13.0
+                minZoom = 16.0
                 focalPoint = FollowingFrameOptions.FocalPoint(0.5, 1.0)
                 pitchNearManeuvers.enabled = true
             }
@@ -1211,7 +1239,7 @@ class MapboxPlatformView(
                 map.setPrefetchZoomDelta(4)
                 toggleTraffic(true)
                 vpOptions?.followingFrameOptions?.apply {
-                    defaultPitch = 45.0
+                    defaultPitch = 50.0
                     maxZoom = 20.0
                 }
                 vpOptions?.overviewFrameOptions?.maxZoom = 20.0
@@ -1220,8 +1248,8 @@ class MapboxPlatformView(
                 map.setPrefetchZoomDelta(0)
                 toggleTraffic(false)
                 vpOptions?.followingFrameOptions?.apply {
-                    maxZoom = 17.0
-                    defaultPitch = 60.0
+                    maxZoom = 18.0
+                    defaultPitch = 55.0
                 }
                 vpOptions?.overviewFrameOptions?.maxZoom = 14.0
             }
@@ -1229,8 +1257,8 @@ class MapboxPlatformView(
                 map.setPrefetchZoomDelta(0)
                 toggleTraffic(false)
                 vpOptions?.followingFrameOptions?.apply {
-                    maxZoom = 16.0
-                    defaultPitch = 65.0
+                    maxZoom = 17.0
+                    defaultPitch = 55.0
                 }
                 vpOptions?.overviewFrameOptions?.maxZoom = 14.0
             }
