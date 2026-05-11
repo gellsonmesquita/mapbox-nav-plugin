@@ -1168,23 +1168,6 @@ class MapboxPlatformView(
         val destinationPoint = Point.fromLngLat(destination[1], destination[0])
         val waypoints = waypointsList?.map { Point.fromLngLat(it[1], it[0]) }
 
-        // If the singleton already has a route to the same destination (e.g. user left and
-        // re-entered the screen), reuse it without making a new Directions API call.
-        if (!isDestinationChange) {
-            val existingRoutes = mapboxNavigation?.getNavigationRoutes() ?: emptyList()
-            val existingDest = existingRoutes.firstOrNull()
-                ?.directionsRoute?.legs()?.lastOrNull()?.steps()?.lastOrNull()
-                ?.maneuver()?.location()
-            if (existingDest != null &&
-                Math.abs(existingDest.latitude() - destinationPoint.latitude()) < 0.0002 &&
-                Math.abs(existingDest.longitude() - destinationPoint.longitude()) < 0.0002
-            ) {
-                Log.d(TAG, "createRoute: rota para o mesmo destino já existe no singleton — reutilizando")
-                mapboxNavigation?.setNavigationRoutes(existingRoutes)
-                return
-            }
-        }
-
         val options = buildRouteOptions(originPoint, destinationPoint, waypoints)
         val routeSignature = buildRouteSignature(originPoint, destinationPoint, waypoints)
         val skipReason = routeRequestGate.skipReason(routeSignature, performancePolicy)
@@ -1194,11 +1177,29 @@ class MapboxPlatformView(
         }
         routeRequestGate.markInFlight(routeSignature)
 
-        // Prefer offline routing when tiles are available — avoids a Directions API call.
-        // If local calculation fails, fall back to the API transparently.
-        val tryOffline = dataSaverMode != DataSaverMode.OFF && hasDownloadedRegions
-        if (!tryOffline) acquireNetwork()
+        // Always query TileStore at call time so we never miss tiles that were cached
+        // after initMapView() fired (e.g. first route corridor download).
+        // In OFF mode skip the async step — network is always on and we go straight to the API.
+        if (dataSaverMode == DataSaverMode.OFF) {
+            acquireNetwork()
+            doRequestRoutes(options, isDestinationChange, tryOffline = false)
+        } else {
+            tileStore.getAllTileRegions { expected ->
+                val hasRegions = expected.isValue && expected.value?.isNotEmpty() == true
+                hasDownloadedRegions = hasRegions
+                android.os.Handler(android.os.Looper.getMainLooper()).post {
+                    if (!hasRegions) acquireNetwork()
+                    doRequestRoutes(options, isDestinationChange, tryOffline = hasRegions)
+                }
+            }
+        }
+    }
 
+    private fun doRequestRoutes(
+        options: RouteOptions,
+        isDestinationChange: Boolean,
+        tryOffline: Boolean,
+    ) {
         mapboxNavigation?.requestRoutes(options, object : NavigationRouterCallback {
             override fun onCanceled(routeOptions: RouteOptions, routerOrigin: String) {
                 if (!tryOffline) releaseNetwork()
@@ -1209,7 +1210,7 @@ class MapboxPlatformView(
 
             override fun onFailure(reasons: List<RouterFailure>, routeOptions: RouteOptions) {
                 if (tryOffline) {
-                    // Local tiles don't cover this route — retry via Directions API.
+                    // Local tiles don't cover this route — retry transparently via Directions API.
                     Log.d(TAG, "Routing offline falhou (${reasons.joinToString { it.message }}), a tentar via API")
                     acquireNetwork()
                     mapboxNavigation?.requestRoutes(routeOptions, object : NavigationRouterCallback {
@@ -1223,8 +1224,8 @@ class MapboxPlatformView(
                             sendEvent("error", mapOf("type" to "routeCalculationFailure", "message" to r.joinToString(", ") { it.message }))
                         }
                         override fun onRoutesReady(routes: List<NavigationRoute>, origin: String) {
-                            releaseNetwork()
-                            routeRequestGate.clearInFlight()
+                            releaseNetwork(); routeRequestGate.clearInFlight()
+                            Log.d(TAG, "Route origin (API fallback): $origin")
                             onRoutesReadyImpl(routes, isDestinationChange)
                         }
                     })
@@ -1618,9 +1619,7 @@ class MapboxPlatformView(
             unregisterRouteProgressObserver(routeProgressObserver)
             unregisterVoiceInstructionsObserver(voiceInstructionsObserver)
             stopTripSession()
-            // Do NOT clear navigation routes here: the singleton retains them so that if the
-            // user re-enters the screen and calls createRoute() with the same destination, we
-            // can detect the match and skip the Directions API call (Fix in createRoute).
+            setNavigationRoutes(emptyList())
             mapboxReplayer.stop()
             mapboxReplayer.clearEvents()
         }
