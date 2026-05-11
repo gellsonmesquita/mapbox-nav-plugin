@@ -751,7 +751,12 @@ class MapboxPlatformView(
     }
 
     private fun cacheRouteData(navigationRoute: NavigationRoute) {
-        if (dataSaverMode == DataSaverMode.AGGRESSIVE && !isWifiConnected) return
+        // Corridor download only uses mobile data in OFF mode with no tiles downloaded yet.
+        // In every other case (BALANCED, AGGRESSIVE, or OFF+tiles) only WiFi is allowed —
+        // skip early so we never call acquireNetwork() and briefly open OfflineSwitch on
+        // mobile data, which would let the entire Mapbox SDK consume data during that window.
+        val allowMobileData = dataSaverMode == DataSaverMode.OFF && !hasDownloadedRegions
+        if (!isWifiConnected && !allowMobileData) return
 
         val geometryStr = navigationRoute.directionsRoute.geometry() ?: return
         // Use destination coordinates (rounded to ~10 m) as cache key so that reroutes to the
@@ -794,12 +799,12 @@ class MapboxPlatformView(
             val descriptors = listOfNotNull(mapDescriptor, routingDescriptor)
             if (descriptors.isEmpty()) return@getAllTileRegions
 
-            // BALANCED: only allow corridor download on Wi-Fi (DISALLOW_EXPENSIVE blocks mobile data).
-            // AGGRESSIVE already returns early when not on Wi-Fi via the check at the top.
-            val networkRestriction = if (dataSaverMode == DataSaverMode.BALANCED)
-                com.mapbox.common.NetworkRestriction.DISALLOW_EXPENSIVE
-            else
+            // We only reach here when WiFi is available (or OFF+noTiles on mobile).
+            // Use NONE because we already guaranteed the correct network is present above.
+            val networkRestriction = if (allowMobileData)
                 com.mapbox.common.NetworkRestriction.NONE
+            else
+                com.mapbox.common.NetworkRestriction.DISALLOW_EXPENSIVE
 
             val options = TileRegionLoadOptions.Builder()
                 .geometry(routeGeometry)
@@ -864,17 +869,18 @@ class MapboxPlatformView(
             applyMapDataSaverConfig()
             if (dataSaverMode != DataSaverMode.OFF) {
                 removeRealtimeSources(style)
-                // Only disable network if the user has downloaded regions.
-                // Without downloaded regions the map would be blank (no tiles in TileStore).
-                tileStore.getAllTileRegions { expected ->
-                    val hasRegions = expected.isValue && expected.value?.isNotEmpty() == true
-                    hasDownloadedRegions = hasRegions
-                    if (hasRegions) {
-                        setMapboxNetwork(false)
-                        Log.d(TAG, "Regioes encontradas — rede desligada (modo offline)")
-                    } else {
-                        Log.d(TAG, "Sem regioes baixadas — rede mantida activa")
-                    }
+            }
+            // Disable network whenever offline tiles exist, regardless of dataSaverMode.
+            // When tiles are downloaded the SDK must use them instead of consuming mobile data.
+            // Network is re-enabled only for specific operations (route request, tile download).
+            tileStore.getAllTileRegions { expected ->
+                val hasRegions = expected.isValue && expected.value?.isNotEmpty() == true
+                hasDownloadedRegions = hasRegions
+                if (hasRegions) {
+                    setMapboxNetwork(false)
+                    Log.d(TAG, "Regioes encontradas — rede desligada")
+                } else {
+                    Log.d(TAG, "Sem regioes baixadas — rede mantida activa")
                 }
             }
             _mapView?.logo?.enabled = false
@@ -1098,7 +1104,7 @@ class MapboxPlatformView(
                 // If offline routing tiles are available, keep the network off — the SDK will
                 // calculate the reroute locally.  Only acquire network when there are no local
                 // tiles (first reroute ever, or outside any downloaded region).
-                val useOfflineReroute = dataSaverMode != DataSaverMode.OFF && hasDownloadedRegions
+                val useOfflineReroute = hasDownloadedRegions
                 if (!useOfflineReroute) {
                     // compareAndSet: only first call per reroute acquires network (SDK may retry).
                     if (rerouteNetworkAcquired.compareAndSet(false, true)) {
@@ -1177,20 +1183,15 @@ class MapboxPlatformView(
         }
         routeRequestGate.markInFlight(routeSignature)
 
-        // Always query TileStore at call time so we never miss tiles that were cached
-        // after initMapView() fired (e.g. first route corridor download).
-        // In OFF mode skip the async step — network is always on and we go straight to the API.
-        if (dataSaverMode == DataSaverMode.OFF) {
-            acquireNetwork()
-            doRequestRoutes(options, isDestinationChange, tryOffline = false)
-        } else {
-            tileStore.getAllTileRegions { expected ->
-                val hasRegions = expected.isValue && expected.value?.isNotEmpty() == true
-                hasDownloadedRegions = hasRegions
-                android.os.Handler(android.os.Looper.getMainLooper()).post {
-                    if (!hasRegions) acquireNetwork()
-                    doRequestRoutes(options, isDestinationChange, tryOffline = hasRegions)
-                }
+        // Always query TileStore at call time for a fresh tile availability check.
+        // Prefer offline routing when tiles exist — avoids a Directions API call regardless
+        // of dataSaverMode. Falls back to the API transparently when tiles don't cover the area.
+        tileStore.getAllTileRegions { expected ->
+            val hasRegions = expected.isValue && expected.value?.isNotEmpty() == true
+            hasDownloadedRegions = hasRegions
+            android.os.Handler(android.os.Looper.getMainLooper()).post {
+                if (!hasRegions) acquireNetwork()
+                doRequestRoutes(options, isDestinationChange, tryOffline = hasRegions)
             }
         }
     }
@@ -1306,14 +1307,16 @@ class MapboxPlatformView(
 
     // Increment reference count — network turns ON on first acquire.
     private fun acquireNetwork() {
-        if (dataSaverMode == DataSaverMode.OFF) return
+        // In OFF mode with no tiles there is nothing to save — network stays always on.
+        if (dataSaverMode == DataSaverMode.OFF && !hasDownloadedRegions) return
         if (networkRefCount.incrementAndGet() == 1) setMapboxNetwork(true)
         Log.d(TAG, "acquireNetwork refs=${networkRefCount.get()}")
     }
 
     // Decrement reference count — network turns OFF when last release is called.
     private fun releaseNetwork() {
-        if (dataSaverMode == DataSaverMode.OFF) return
+        // In OFF mode with no tiles there is nothing to save — network stays always on.
+        if (dataSaverMode == DataSaverMode.OFF && !hasDownloadedRegions) return
         val refs = networkRefCount.decrementAndGet().coerceAtLeast(0)
         networkRefCount.set(refs)
         if (refs == 0) setMapboxNetwork(false)
