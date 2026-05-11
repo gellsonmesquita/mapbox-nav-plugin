@@ -176,6 +176,9 @@ class MapboxPlatformView(
     private val networkRefCount = java.util.concurrent.atomic.AtomicInteger(0)
     // Prevents duplicate acquires across reroute retries; released in routesObserver or cancelNavigation.
     private val rerouteNetworkAcquired = java.util.concurrent.atomic.AtomicBoolean(false)
+    // True once at least one offline region (or route corridor) is confirmed in TileStore.
+    // Used to decide whether to attempt offline-first routing before calling the Directions API.
+    @Volatile private var hasDownloadedRegions = false
     private var isTripSessionActive = false
     private var isVoiceInstructionsMuted = false
         set(value) {
@@ -751,7 +754,17 @@ class MapboxPlatformView(
         if (dataSaverMode == DataSaverMode.AGGRESSIVE && !isWifiConnected) return
 
         val geometryStr = navigationRoute.directionsRoute.geometry() ?: return
-        val routeId = "route_cache_${navigationRoute.directionsRoute.hashCode()}"
+        // Use destination coordinates (rounded to ~10 m) as cache key so that reroutes to the
+        // same destination reuse the existing tile region instead of re-downloading it every time.
+        val dest = navigationRoute.directionsRoute.legs()
+            ?.lastOrNull()?.steps()?.lastOrNull()?.maneuver()?.location()
+        val routeId = if (dest != null) {
+            val latKey = Math.round(dest.latitude() * 10_000)
+            val lngKey = Math.round(dest.longitude() * 10_000)
+            "route_cache_${latKey}_${lngKey}"
+        } else {
+            "route_cache_${navigationRoute.directionsRoute.hashCode()}"
+        }
 
         tileStore.getAllTileRegions { expected ->
             if (expected.isValue && expected.value?.any { it.id == routeId } == true) {
@@ -804,6 +817,7 @@ class MapboxPlatformView(
                 { expectedResult ->
                     releaseNetwork()
                     if (expectedResult.isValue) {
+                        hasDownloadedRegions = true
                         val region = expectedResult.value!!
                         Log.d(TAG, "cacheRouteData DONE tiles=${region.completedResourceCount} bytes=${region.completedResourceSize} modo=$dataSaverMode")
                     } else {
@@ -854,6 +868,7 @@ class MapboxPlatformView(
                 // Without downloaded regions the map would be blank (no tiles in TileStore).
                 tileStore.getAllTileRegions { expected ->
                     val hasRegions = expected.isValue && expected.value?.isNotEmpty() == true
+                    hasDownloadedRegions = hasRegions
                     if (hasRegions) {
                         setMapboxNetwork(false)
                         Log.d(TAG, "Regioes encontradas — rede desligada (modo offline)")
@@ -991,6 +1006,7 @@ class MapboxPlatformView(
                         Log.e(TAG, "Erro no download de $region: ${expected.error}")
                         sendEvent("error", mapOf("message" to expected.error.toString()))
                     } else {
+                        hasDownloadedRegions = true
                         Log.d(TAG, "Região $region baixada com sucesso!")
                         sendEvent("offlineDownloadComplete", mapOf("id" to region))
                     }
@@ -1079,10 +1095,18 @@ class MapboxPlatformView(
         mapboxNavigation?.registerVoiceInstructionsObserver(voiceInstructionsObserver)
         mapboxNavigation?.setRerouteOptionsAdapter(object : RerouteOptionsAdapter {
             override fun onRouteOptions(routeOptions: RouteOptions): RouteOptions {
-                // compareAndSet: only first call per reroute acquires network (SDK may retry).
-                if (rerouteNetworkAcquired.compareAndSet(false, true)) {
-                    acquireNetwork()
-                    Log.d(TAG, "Reroute: rede adquirida")
+                // If offline routing tiles are available, keep the network off — the SDK will
+                // calculate the reroute locally.  Only acquire network when there are no local
+                // tiles (first reroute ever, or outside any downloaded region).
+                val useOfflineReroute = dataSaverMode != DataSaverMode.OFF && hasDownloadedRegions
+                if (!useOfflineReroute) {
+                    // compareAndSet: only first call per reroute acquires network (SDK may retry).
+                    if (rerouteNetworkAcquired.compareAndSet(false, true)) {
+                        acquireNetwork()
+                        Log.d(TAG, "Reroute: rede adquirida (sem tiles locais)")
+                    }
+                } else {
+                    Log.d(TAG, "Reroute: usando tiles locais — sem chamada à API")
                 }
                 val preferredOverview = when (dataSaverMode) {
                     DataSaverMode.OFF -> routeOverview
@@ -1144,6 +1168,23 @@ class MapboxPlatformView(
         val destinationPoint = Point.fromLngLat(destination[1], destination[0])
         val waypoints = waypointsList?.map { Point.fromLngLat(it[1], it[0]) }
 
+        // If the singleton already has a route to the same destination (e.g. user left and
+        // re-entered the screen), reuse it without making a new Directions API call.
+        if (!isDestinationChange) {
+            val existingRoutes = mapboxNavigation?.getNavigationRoutes() ?: emptyList()
+            val existingDest = existingRoutes.firstOrNull()
+                ?.directionsRoute?.legs()?.lastOrNull()?.steps()?.lastOrNull()
+                ?.maneuver()?.location()
+            if (existingDest != null &&
+                Math.abs(existingDest.latitude() - destinationPoint.latitude()) < 0.0002 &&
+                Math.abs(existingDest.longitude() - destinationPoint.longitude()) < 0.0002
+            ) {
+                Log.d(TAG, "createRoute: rota para o mesmo destino já existe no singleton — reutilizando")
+                mapboxNavigation?.setNavigationRoutes(existingRoutes)
+                return
+            }
+        }
+
         val options = buildRouteOptions(originPoint, destinationPoint, waypoints)
         val routeSignature = buildRouteSignature(originPoint, destinationPoint, waypoints)
         val skipReason = routeRequestGate.skipReason(routeSignature, performancePolicy)
@@ -1152,53 +1193,85 @@ class MapboxPlatformView(
             return
         }
         routeRequestGate.markInFlight(routeSignature)
-        acquireNetwork()
+
+        // Prefer offline routing when tiles are available — avoids a Directions API call.
+        // If local calculation fails, fall back to the API transparently.
+        val tryOffline = dataSaverMode != DataSaverMode.OFF && hasDownloadedRegions
+        if (!tryOffline) acquireNetwork()
 
         mapboxNavigation?.requestRoutes(options, object : NavigationRouterCallback {
             override fun onCanceled(routeOptions: RouteOptions, routerOrigin: String) {
-                releaseNetwork()
+                if (!tryOffline) releaseNetwork()
                 routeRequestGate.clearInFlight()
                 pendingStartNavigation = false
                 sendEvent("routeCanceled", null)
             }
+
             override fun onFailure(reasons: List<RouterFailure>, routeOptions: RouteOptions) {
-                releaseNetwork()
-                routeRequestGate.clearInFlight()
-                pendingStartNavigation = false
-                val message = reasons.joinToString(", ") { it.message }
-                sendEvent("error", mapOf("type" to "routeCalculationFailure", "message" to message))
+                if (tryOffline) {
+                    // Local tiles don't cover this route — retry via Directions API.
+                    Log.d(TAG, "Routing offline falhou (${reasons.joinToString { it.message }}), a tentar via API")
+                    acquireNetwork()
+                    mapboxNavigation?.requestRoutes(routeOptions, object : NavigationRouterCallback {
+                        override fun onCanceled(ro: RouteOptions, origin: String) {
+                            releaseNetwork(); routeRequestGate.clearInFlight()
+                            pendingStartNavigation = false; sendEvent("routeCanceled", null)
+                        }
+                        override fun onFailure(r: List<RouterFailure>, ro: RouteOptions) {
+                            releaseNetwork(); routeRequestGate.clearInFlight()
+                            pendingStartNavigation = false
+                            sendEvent("error", mapOf("type" to "routeCalculationFailure", "message" to r.joinToString(", ") { it.message }))
+                        }
+                        override fun onRoutesReady(routes: List<NavigationRoute>, origin: String) {
+                            releaseNetwork()
+                            routeRequestGate.clearInFlight()
+                            onRoutesReadyImpl(routes, isDestinationChange)
+                        }
+                    })
+                } else {
+                    releaseNetwork()
+                    routeRequestGate.clearInFlight()
+                    pendingStartNavigation = false
+                    val message = reasons.joinToString(", ") { it.message }
+                    sendEvent("error", mapOf("type" to "routeCalculationFailure", "message" to message))
+                }
             }
 
             override fun onRoutesReady(routes: List<NavigationRoute>, routerOrigin: String) {
-                releaseNetwork()
+                if (!tryOffline) releaseNetwork()
                 routeRequestGate.clearInFlight()
-                val validRoutes = routes.filter { !isRouteInForbiddenZone(it.directionsRoute) }
-                if (validRoutes.isNotEmpty()) {
-                    mapboxNavigation?.setNavigationRoutes(validRoutes)
-                    if (behaviorPolicy.autoOverviewOnRouteReady) {
-                        navigationCamera?.requestNavigationCameraToOverview()
-                    }
-                    sendEvent("routeCreated", mapOf(
-                        "routeId" to validRoutes.first().directionsRoute.hashCode().toString(),
-                        "routeCount" to validRoutes.size,
-                        "distance" to validRoutes.first().directionsRoute.distance(),
-                        "duration" to validRoutes.first().directionsRoute.duration()
-                    ))
-                    if (isDestinationChange || pendingStartNavigation) {
-                        pendingStartNavigation = false
-                        // Pass validRoutes directly: routesObserver may fire async so
-                        // routeLineApi.getNavigationRoutes() could still be empty here.
-                        setRouteAndStartNavigation(validRoutes)
-                        if (behaviorPolicy.autoFollowOnDestinationChange) {
-                            navigationCamera?.requestNavigationCameraToFollowing()
-                        }
-                    }
-                } else {
-                    sendEvent("routeCreated", mapOf("routeCount" to 0))
-                }
-
+                Log.d(TAG, "Route origin: $routerOrigin")
+                onRoutesReadyImpl(routes, isDestinationChange)
             }
         })
+    }
+
+    private fun onRoutesReadyImpl(routes: List<NavigationRoute>, isDestinationChange: Boolean) {
+        val validRoutes = routes.filter { !isRouteInForbiddenZone(it.directionsRoute) }
+        if (validRoutes.isNotEmpty()) {
+            mapboxNavigation?.setNavigationRoutes(validRoutes)
+            if (behaviorPolicy.autoOverviewOnRouteReady) {
+                navigationCamera?.requestNavigationCameraToOverview()
+            }
+            sendEvent("routeCreated", mapOf(
+                "routeId" to validRoutes.first().directionsRoute.hashCode().toString(),
+                "routeCount" to validRoutes.size,
+                "distance" to validRoutes.first().directionsRoute.distance(),
+                "duration" to validRoutes.first().directionsRoute.duration()
+            ))
+            if (isDestinationChange || pendingStartNavigation) {
+                pendingStartNavigation = false
+                // Pass validRoutes directly: routesObserver may fire async so
+                // routeLineApi.getNavigationRoutes() could still be empty here.
+                setRouteAndStartNavigation(validRoutes)
+                if (behaviorPolicy.autoFollowOnDestinationChange) {
+                    navigationCamera?.requestNavigationCameraToFollowing()
+                }
+            }
+        } else {
+            pendingStartNavigation = false
+            sendEvent("routeCreated", mapOf("routeCount" to 0))
+        }
     }
 
     @SuppressLint("MissingPermission")
@@ -1545,7 +1618,9 @@ class MapboxPlatformView(
             unregisterRouteProgressObserver(routeProgressObserver)
             unregisterVoiceInstructionsObserver(voiceInstructionsObserver)
             stopTripSession()
-            setNavigationRoutes(emptyList())
+            // Do NOT clear navigation routes here: the singleton retains them so that if the
+            // user re-enters the screen and calls createRoute() with the same destination, we
+            // can detect the match and skip the Directions API call (Fix in createRoute).
             mapboxReplayer.stop()
             mapboxReplayer.clearEvents()
         }
