@@ -184,6 +184,13 @@ class MapboxPlatformView(
     private val concurrentDownloadCount = java.util.concurrent.atomic.AtomicInteger(0)
     // Dynamic Wi-Fi detection — updated via ConnectivityManager callback.
     private var networkCallback: android.net.ConnectivityManager.NetworkCallback? = null
+    // Bounding boxes of explicitly downloaded regions (persisted across sessions via SharedPrefs).
+    // Used to detect when the user leaves a downloaded area so tiles can be served from network.
+    private val downloadedRegionBounds = mutableMapOf<String, RegionBounds>()
+    // True when the current position is outside all downloaded regions.
+    // In this state the network stays ON (at low zoom) so the map is not blank.
+    @Volatile private var isInUndownloadedArea = false
+    private var lastAreaCheckMs = 0L
     private var isTripSessionActive = false
     private var isVoiceInstructionsMuted = false
         set(value) {
@@ -309,6 +316,9 @@ class MapboxPlatformView(
                 firstLocationUpdateReceived = true
                 navigationCamera?.requestNavigationCameraToFollowing()
             }
+            // Detect when the user crosses into/out of a downloaded region.
+            // Throttled internally — safe to call on every location update.
+            checkAreaStatus(enhancedLocation.latitude, enhancedLocation.longitude)
         }
     }
 
@@ -402,6 +412,7 @@ class MapboxPlatformView(
             }
         }
         connectivityManager?.registerDefaultNetworkCallback(networkCallback!!)
+        loadAllRegionBounds()
         eventChannel = EventChannel(messenger, "$eventChannelBaseName/$viewId")
         eventChannel.setStreamHandler(this)
         methodChannel = MethodChannel(messenger, "$eventChannelBaseName/$viewId/methods")
@@ -588,6 +599,7 @@ class MapboxPlatformView(
                     result.error("MISSING_ARG", "region is required", null)
                 } else {
                     tileStore.removeTileRegion(region)
+                    removeRegionBounds(region)
                     Log.d(TAG, "Região $region removida.")
                     result.success(null)
                 }
@@ -1043,6 +1055,8 @@ class MapboxPlatformView(
                         // Set hasDownloadedRegions BEFORE releaseNetwork so the ref-count logic
                         // in releaseNetwork is active and correctly transitions to managed state.
                         hasDownloadedRegions = true
+                        // Persist bounds so the app knows where this region is in future sessions.
+                        saveRegionBounds(region, north, east, south, west)
                         Log.d(TAG, "Região $region baixada com sucesso!")
                         sendEvent("offlineDownloadComplete", mapOf("id" to region))
                         if (wasFirstDownload) {
@@ -1356,14 +1370,15 @@ class MapboxPlatformView(
         Log.d(TAG, "acquireNetwork refs=${networkRefCount.get()}")
     }
 
-    // Decrement reference count — network turns OFF when last release is called.
+    // Decrement reference count — network turns OFF when last release is called,
+    // unless the user is currently outside all downloaded regions (tiles still need network).
     private fun releaseNetwork() {
         // Mirror of acquireNetwork: no-op until regions exist.
         if (!hasDownloadedRegions) return
         val refs = networkRefCount.decrementAndGet().coerceAtLeast(0)
         networkRefCount.set(refs)
-        if (refs == 0) setMapboxNetwork(false)
-        Log.d(TAG, "releaseNetwork refs=$refs")
+        if (refs == 0 && !isInUndownloadedArea) setMapboxNetwork(false)
+        Log.d(TAG, "releaseNetwork refs=$refs inUndownloaded=$isInUndownloadedArea")
     }
 
     private fun applyMapDataSaverConfig() {
@@ -1696,10 +1711,105 @@ class MapboxPlatformView(
         Log.d(TAG, "MapboxPlatformView com ID $viewId descartada e recursos liberados.")
     }
 
+    // ── Region-bounds persistence ─────────────────────────────────────────────
+
+    private fun saveRegionBounds(regionId: String, north: Double, east: Double, south: Double, west: Double) {
+        context.getSharedPreferences(REGION_BOUNDS_PREFS, android.content.Context.MODE_PRIVATE)
+            .edit().putString(regionId, "$north,$east,$south,$west").apply()
+        downloadedRegionBounds[regionId] = RegionBounds(north, east, south, west)
+    }
+
+    private fun removeRegionBounds(regionId: String) {
+        context.getSharedPreferences(REGION_BOUNDS_PREFS, android.content.Context.MODE_PRIVATE)
+            .edit().remove(regionId).apply()
+        downloadedRegionBounds.remove(regionId)
+    }
+
+    private fun loadAllRegionBounds() {
+        val prefs = context.getSharedPreferences(REGION_BOUNDS_PREFS, android.content.Context.MODE_PRIVATE)
+        downloadedRegionBounds.clear()
+        prefs.all.forEach { (key, value) ->
+            val parts = (value as? String)?.split(",") ?: return@forEach
+            if (parts.size == 4) {
+                val n = parts[0].toDoubleOrNull() ?: return@forEach
+                val e = parts[1].toDoubleOrNull() ?: return@forEach
+                val s = parts[2].toDoubleOrNull() ?: return@forEach
+                val w = parts[3].toDoubleOrNull() ?: return@forEach
+                downloadedRegionBounds[key] = RegionBounds(n, e, s, w)
+            }
+        }
+        Log.d(TAG, "Limites de regiões carregados: ${downloadedRegionBounds.size}")
+    }
+
+    // ── Location-based area detection ────────────────────────────────────────
+
+    private fun checkAreaStatus(lat: Double, lng: Double) {
+        // Only meaningful when regions exist and we have their bounds stored.
+        if (!hasDownloadedRegions || downloadedRegionBounds.isEmpty()) return
+        val now = System.currentTimeMillis()
+        if (now - lastAreaCheckMs < AREA_CHECK_INTERVAL_MS) return
+        lastAreaCheckMs = now
+
+        val insideARegion = downloadedRegionBounds.values.any { it.contains(lat, lng) }
+        if (!insideARegion && !isInUndownloadedArea) {
+            enterUndownloadedArea()
+        } else if (insideARegion && isInUndownloadedArea) {
+            exitUndownloadedArea()
+        }
+    }
+
+    private fun enterUndownloadedArea() {
+        isInUndownloadedArea = true
+        // Enable network so map tiles can be fetched, but cap the zoom so only
+        // lightweight overview tiles are loaded (zoom 14 ≈ 10× less data than zoom 17).
+        if (hasDownloadedRegions) {
+            setMapboxNetwork(true)
+            Log.d(TAG, "Fora de região baixada — rede activada (zoom cap $UNDOWNLOADED_AREA_MAX_ZOOM)")
+        }
+        // Block both the automatic camera AND manual gesture zoom so the user cannot
+        // accidentally trigger high-zoom tile downloads in non-downloaded areas.
+        _mapView?.mapboxMap?.setMaxZoom(UNDOWNLOADED_AREA_MAX_ZOOM)
+        if (::viewportDataSource.isInitialized) {
+            viewportDataSource.options.followingFrameOptions.maxZoom = UNDOWNLOADED_AREA_MAX_ZOOM
+            viewportDataSource.options.overviewFrameOptions.maxZoom = UNDOWNLOADED_AREA_MAX_ZOOM - 2.0
+            viewportDataSource.evaluate()
+        }
+        sendEvent("mapCoverageChanged", mapOf("inDownloadedRegion" to false, "maxZoom" to UNDOWNLOADED_AREA_MAX_ZOOM))
+    }
+
+    private fun exitUndownloadedArea() {
+        isInUndownloadedArea = false
+        // Restore full gesture zoom range before applying mode-specific viewport caps.
+        _mapView?.mapboxMap?.setMaxZoom(22.0)
+        // Only cut the network if no explicit operation is keeping it open.
+        if (hasDownloadedRegions && networkRefCount.get() == 0) {
+            setMapboxNetwork(false)
+            Log.d(TAG, "De volta a região baixada — rede desactivada")
+        }
+        // Restore zoom limits for the active data-saver mode.
+        applyMapDataSaverConfig()
+        sendEvent("mapCoverageChanged", mapOf("inDownloadedRegion" to true))
+    }
+
+    // Bounding box of an explicitly downloaded region.
+    private data class RegionBounds(
+        val north: Double, val east: Double,
+        val south: Double, val west: Double
+    ) {
+        fun contains(lat: Double, lng: Double) = lat in south..north && lng in west..east
+    }
+
     companion object {
         // Singleton so all view instances (and recreations) share the same underlying store,
         // preventing duplicate downloads and ensuring MapboxMapsOptions.tileStore always
         // points to the same object across the app's lifetime.
         val tileStore: TileStore by lazy { TileStore.create() }
+
+        // Maximum zoom used when rendering tiles in non-downloaded areas.
+        // Zoom 14 covers ~5 km and uses ~10× fewer tiles than zoom 17 (navigation level).
+        private const val UNDOWNLOADED_AREA_MAX_ZOOM = 14.0
+        // Minimum interval between location-based region checks (avoids running on every GPS fix).
+        private const val AREA_CHECK_INTERVAL_MS = 10_000L
+        private const val REGION_BOUNDS_PREFS = "mapbox_nav_region_bounds"
     }
 }
