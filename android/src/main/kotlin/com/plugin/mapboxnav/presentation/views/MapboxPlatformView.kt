@@ -179,6 +179,11 @@ class MapboxPlatformView(
     // True once at least one offline region (or route corridor) is confirmed in TileStore.
     // Used to decide whether to attempt offline-first routing before calling the Directions API.
     @Volatile private var hasDownloadedRegions = false
+    // Tracks concurrent region downloads so the network isn't turned off while another download
+    // is still in progress (relevant when the very first region is being downloaded).
+    private val concurrentDownloadCount = java.util.concurrent.atomic.AtomicInteger(0)
+    // Dynamic Wi-Fi detection — updated via ConnectivityManager callback.
+    private var networkCallback: android.net.ConnectivityManager.NetworkCallback? = null
     private var isTripSessionActive = false
     private var isVoiceInstructionsMuted = false
         set(value) {
@@ -382,6 +387,21 @@ class MapboxPlatformView(
         val connectivityManager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? android.net.ConnectivityManager
         val networkInfo = connectivityManager?.activeNetworkInfo
         isWifiConnected = networkInfo?.type == android.net.ConnectivityManager.TYPE_WIFI
+        // Keep isWifiConnected in sync as the user switches between Wi-Fi and mobile data.
+        networkCallback = object : android.net.ConnectivityManager.NetworkCallback() {
+            override fun onCapabilitiesChanged(
+                network: android.net.Network,
+                caps: android.net.NetworkCapabilities
+            ) {
+                isWifiConnected = caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI)
+                Log.d(TAG, "Rede atualizada: isWifi=$isWifiConnected")
+            }
+            override fun onLost(network: android.net.Network) {
+                isWifiConnected = false
+                Log.d(TAG, "Rede perdida: isWifi=false")
+            }
+        }
+        connectivityManager?.registerDefaultNetworkCallback(networkCallback!!)
         eventChannel = EventChannel(messenger, "$eventChannelBaseName/$viewId")
         eventChannel.setStreamHandler(this)
         methodChannel = MethodChannel(messenger, "$eventChannelBaseName/$viewId/methods")
@@ -956,12 +976,18 @@ class MapboxPlatformView(
     }
 
     fun downloadRegionOffline(region: String, north: Double, east: Double, south: Double, west: Double, maxZoom: Int = 17) {
+        // Track concurrent downloads so we don't turn the network off while another is in progress.
+        concurrentDownloadCount.incrementAndGet()
+        // acquireNetwork is a no-op when !hasDownloadedRegions (network is always ON in that state).
+        // When regions already exist we need the ref count to stay balanced.
         acquireNetwork()
+
         tileStore.getAllTileRegions { expected ->
             if (expected.isValue) {
                 val existingRegions = expected.value ?: emptyList()
                 if (existingRegions.any { it.id == region }) {
                     Log.d(TAG, "A região $region já está baixada. Ignorando download.")
+                    concurrentDownloadCount.decrementAndGet()
                     releaseNetwork()
                     sendEvent("offlineDownloadComplete", mapOf("id" to region, "status" to "already_exists"))
                     return@getAllTileRegions
@@ -1007,14 +1033,29 @@ class MapboxPlatformView(
                     }
                 },
                 { expected ->
-                    releaseNetwork()
+                    val remainingDownloads = concurrentDownloadCount.decrementAndGet()
                     if (expected.isError) {
                         Log.e(TAG, "Erro no download de $region: ${expected.error}")
+                        releaseNetwork()
                         sendEvent("error", mapOf("message" to expected.error.toString()))
                     } else {
+                        val wasFirstDownload = !hasDownloadedRegions
+                        // Set hasDownloadedRegions BEFORE releaseNetwork so the ref-count logic
+                        // in releaseNetwork is active and correctly transitions to managed state.
                         hasDownloadedRegions = true
                         Log.d(TAG, "Região $region baixada com sucesso!")
                         sendEvent("offlineDownloadComplete", mapOf("id" to region))
+                        if (wasFirstDownload) {
+                            // Transition: network was unmanaged (always ON). Switch to managed
+                            // mode only after ALL concurrent downloads finish to avoid cutting
+                            // the network while another download is still in progress.
+                            if (remainingDownloads == 0 && networkRefCount.get() == 0) {
+                                setMapboxNetwork(false)
+                                Log.d(TAG, "Primeiro download concluído — iniciando gestão da rede")
+                            }
+                        } else {
+                            releaseNetwork()
+                        }
                     }
                 }
             )
@@ -1307,16 +1348,18 @@ class MapboxPlatformView(
 
     // Increment reference count — network turns ON on first acquire.
     private fun acquireNetwork() {
-        // In OFF mode with no tiles there is nothing to save — network stays always on.
-        if (dataSaverMode == DataSaverMode.OFF && !hasDownloadedRegions) return
+        // When no regions are downloaded there is nothing to save: the whole app depends on
+        // the network for map tiles and routing. Leave OfflineSwitch untouched (stays ON).
+        // Network management only starts after the first region has been downloaded.
+        if (!hasDownloadedRegions) return
         if (networkRefCount.incrementAndGet() == 1) setMapboxNetwork(true)
         Log.d(TAG, "acquireNetwork refs=${networkRefCount.get()}")
     }
 
     // Decrement reference count — network turns OFF when last release is called.
     private fun releaseNetwork() {
-        // In OFF mode with no tiles there is nothing to save — network stays always on.
-        if (dataSaverMode == DataSaverMode.OFF && !hasDownloadedRegions) return
+        // Mirror of acquireNetwork: no-op until regions exist.
+        if (!hasDownloadedRegions) return
         val refs = networkRefCount.decrementAndGet().coerceAtLeast(0)
         networkRefCount.set(refs)
         if (refs == 0) setMapboxNetwork(false)
@@ -1615,6 +1658,9 @@ class MapboxPlatformView(
     @SuppressLint("MissingPermission")
     override fun dispose() {
         Log.d(TAG, "Disposing MapboxPlatformView com ID $viewId")
+        val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? android.net.ConnectivityManager
+        networkCallback?.let { cm?.unregisterNetworkCallback(it) }
+        networkCallback = null
         MapboxViewManager.unregisterView(viewId)
         mapboxNavigation?.apply {
             unregisterRoutesObserver(routesObserver)
