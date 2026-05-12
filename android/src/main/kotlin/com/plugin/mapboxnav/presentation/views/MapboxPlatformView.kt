@@ -1768,7 +1768,9 @@ class MapboxPlatformView(
         }
         // Block both the automatic camera AND manual gesture zoom so the user cannot
         // accidentally trigger high-zoom tile downloads in non-downloaded areas.
-        _mapView?.mapboxMap?.setMaxZoom(UNDOWNLOADED_AREA_MAX_ZOOM)
+        _mapView?.mapboxMap?.setBounds(
+            com.mapbox.maps.CameraBoundsOptions.Builder().maxZoom(UNDOWNLOADED_AREA_MAX_ZOOM).build()
+        )
         if (::viewportDataSource.isInitialized) {
             viewportDataSource.options.followingFrameOptions.maxZoom = UNDOWNLOADED_AREA_MAX_ZOOM
             viewportDataSource.options.overviewFrameOptions.maxZoom = UNDOWNLOADED_AREA_MAX_ZOOM - 2.0
@@ -1780,7 +1782,9 @@ class MapboxPlatformView(
     private fun exitUndownloadedArea() {
         isInUndownloadedArea = false
         // Restore full gesture zoom range before applying mode-specific viewport caps.
-        _mapView?.mapboxMap?.setMaxZoom(22.0)
+        _mapView?.mapboxMap?.setBounds(
+            com.mapbox.maps.CameraBoundsOptions.Builder().maxZoom(22.0).build()
+        )
         // Only cut the network if no explicit operation is keeping it open.
         if (hasDownloadedRegions && networkRefCount.get() == 0) {
             setMapboxNetwork(false)
