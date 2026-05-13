@@ -1304,9 +1304,49 @@ class MapboxPlatformView(
             }
 
             override fun onRoutesReady(routes: List<NavigationRoute>, routerOrigin: String) {
-                if (!tryOffline) releaseNetwork()
-                routeRequestGate.clearInFlight()
                 Log.d(TAG, "Route origin: $routerOrigin")
+                if (tryOffline) {
+                    // Validate that the offline route actually starts near the requested origin.
+                    // Corridor tiles cover a buffer around the cached route (A→D). If the user
+                    // has moved away from that corridor, the offline router snaps to the nearest
+                    // road inside the tile set — which may be the old start (A), not the user's
+                    // current position (B). Detect this and retry via API for an accurate route.
+                    val requestedOrigin = options.coordinatesList().firstOrNull()
+                    val routeStart = routes.firstOrNull()?.directionsRoute
+                        ?.legs()?.firstOrNull()?.steps()?.firstOrNull()?.maneuver()?.location()
+                    if (requestedOrigin != null && routeStart != null) {
+                        val snapResults = FloatArray(1)
+                        android.location.Location.distanceBetween(
+                            requestedOrigin.latitude(), requestedOrigin.longitude(),
+                            routeStart.latitude(), routeStart.longitude(),
+                            snapResults
+                        )
+                        if (snapResults[0] > ROUTE_ORIGIN_MAX_SNAP_DISTANCE_M) {
+                            Log.d(TAG, "Offline snap ${snapResults[0].toInt()}m > ${ROUTE_ORIGIN_MAX_SNAP_DISTANCE_M.toInt()}m — retrying via API")
+                            acquireNetwork()
+                            mapboxNavigation?.requestRoutes(options, object : NavigationRouterCallback {
+                                override fun onCanceled(ro: RouteOptions, origin: String) {
+                                    releaseNetwork(); routeRequestGate.clearInFlight()
+                                    pendingStartNavigation = false; sendEvent("routeCanceled", null)
+                                }
+                                override fun onFailure(r: List<RouterFailure>, ro: RouteOptions) {
+                                    releaseNetwork(); routeRequestGate.clearInFlight()
+                                    pendingStartNavigation = false
+                                    sendEvent("error", mapOf("type" to "routeCalculationFailure", "message" to r.joinToString(", ") { it.message }))
+                                }
+                                override fun onRoutesReady(routes: List<NavigationRoute>, origin: String) {
+                                    releaseNetwork(); routeRequestGate.clearInFlight()
+                                    Log.d(TAG, "Route origin (API after snap correction): $origin")
+                                    onRoutesReadyImpl(routes, isDestinationChange)
+                                }
+                            })
+                            return
+                        }
+                    }
+                } else {
+                    releaseNetwork()
+                }
+                routeRequestGate.clearInFlight()
                 onRoutesReadyImpl(routes, isDestinationChange)
             }
         })
@@ -1836,6 +1876,12 @@ class MapboxPlatformView(
         // Prevents stale locations replayed by the SDK singleton (after screen reopen) from
         // overriding the Flutter-provided origin with coordinates from a previous session.
         private const val FRESH_LOCATION_MAX_AGE_MS = 10_000L
+        // Maximum allowed distance (metres) between the requested origin and the offline
+        // router's snapped start point. Corridor tiles cover a buffer around the cached route;
+        // if the user has moved outside that buffer the offline router snaps to the nearest
+        // road inside the tile set (the old route start), producing a visual gap. When the
+        // snap exceeds this threshold the route is retried transparently via the Directions API.
+        private const val ROUTE_ORIGIN_MAX_SNAP_DISTANCE_M = 50f
         private const val REGION_BOUNDS_PREFS = "mapbox_nav_region_bounds"
     }
 }
