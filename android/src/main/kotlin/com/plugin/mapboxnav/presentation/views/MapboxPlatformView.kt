@@ -1221,7 +1221,7 @@ class MapboxPlatformView(
         }
 
         val lastLoc = navigationLocationProvider.lastLocation
-        val locationAge = System.currentTimeMillis() - (lastLoc?.time ?: 0L)
+        val locationAge = System.currentTimeMillis() - (lastLoc?.timestamp ?: 0L)
         val isFreshLocation = lastLoc != null && locationAge <= FRESH_LOCATION_MAX_AGE_MS
         val originPoint = if (isFreshLocation) {
             Point.fromLngLat(lastLoc!!.longitude, lastLoc.latitude)
