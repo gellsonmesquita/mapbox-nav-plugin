@@ -191,6 +191,10 @@ class MapboxPlatformView(
     // In this state the network stays ON (at low zoom) so the map is not blank.
     @Volatile private var isInUndownloadedArea = false
     private var lastAreaCheckMs = 0L
+    // Timestamp of the last location update received from the trip session.
+    // Used to distinguish a fresh GPS fix from a stale location replayed by the SDK singleton
+    // when the screen is reopened — stale locations must not override the Flutter-provided origin.
+    @Volatile private var lastLocationUpdateMs = 0L
     private var isTripSessionActive = false
     private var isVoiceInstructionsMuted = false
         set(value) {
@@ -288,6 +292,7 @@ class MapboxPlatformView(
         override fun onNewLocationMatcherResult(locationMatcherResult: LocationMatcherResult) {
             _mapView ?: return
             val enhancedLocation = locationMatcherResult.enhancedLocation
+            lastLocationUpdateMs = System.currentTimeMillis()
             navigationLocationProvider.changePosition(
                 location = enhancedLocation,
                 keyPoints = locationMatcherResult.keyPoints,
@@ -1220,7 +1225,9 @@ class MapboxPlatformView(
             return
         }
 
-        val originPoint = if (navigationLocationProvider.lastLocation != null) {
+        val isFreshLocation = navigationLocationProvider.lastLocation != null &&
+            (System.currentTimeMillis() - lastLocationUpdateMs) <= FRESH_LOCATION_MAX_AGE_MS
+        val originPoint = if (isFreshLocation) {
             Point.fromLngLat(navigationLocationProvider.lastLocation!!.longitude, navigationLocationProvider.lastLocation!!.latitude)
         } else {
             Point.fromLngLat(origin[1], origin[0])
@@ -1814,6 +1821,10 @@ class MapboxPlatformView(
         private const val UNDOWNLOADED_AREA_MAX_ZOOM = 14.0
         // Minimum interval between location-based region checks (avoids running on every GPS fix).
         private const val AREA_CHECK_INTERVAL_MS = 10_000L
+        // Maximum age of a GPS fix to be considered fresh enough to use as route origin.
+        // Prevents stale locations replayed by the SDK singleton (after screen reopen) from
+        // overriding the Flutter-provided origin with coordinates from a previous session.
+        private const val FRESH_LOCATION_MAX_AGE_MS = 10_000L
         private const val REGION_BOUNDS_PREFS = "mapbox_nav_region_bounds"
     }
 }
