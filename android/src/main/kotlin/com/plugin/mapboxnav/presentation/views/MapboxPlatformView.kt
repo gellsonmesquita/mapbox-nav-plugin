@@ -171,6 +171,9 @@ class MapboxPlatformView(
     private val offlineProgressLimiterByRegion = mutableMapOf<String, EventRateLimiter>()
     private val lastOfflineProgressPercentByRegion = mutableMapOf<String, Double>()
     private var pendingStartNavigation = false
+    // True when WE called setNavigationRoutes — distinguishes our route sets from SDK reroutes
+    // so that the snap-distance validation in routesObserver only fires on automatic reroutes.
+    private var routeSetByUs = false
     // Reference counter: network stays ON while any download is in progress.
     // Prevents race conditions when route calculation and cacheRouteData overlap.
     private val networkRefCount = java.util.concurrent.atomic.AtomicInteger(0)
@@ -244,8 +247,58 @@ class MapboxPlatformView(
             releaseNetwork()
             Log.d(TAG, "Reroute: rede libertada")
         }
+        // Capture and reset the flag before any early-return so it is always cleared.
+        val wasSetByUs = routeSetByUs
+        routeSetByUs = false
+
         if (routeUpdateResult.navigationRoutes.isNotEmpty()) {
             val primaryRoute = routeUpdateResult.navigationRoutes.first()
+
+            // Automatic SDK reroute snap validation — same problem as the initial route:
+            // offline tiles cover the old corridor (A→D); if the user has moved away, the
+            // offline router snaps the reroute origin to the old corridor instead of the
+            // user's actual position. Detect this and retry via the Directions API.
+            if (!wasSetByUs && isTripSessionActive) {
+                val lastLoc = navigationLocationProvider.lastLocation
+                val locAge = System.currentTimeMillis() - (lastLoc?.timestamp ?: 0L)
+                val isFreshLoc = lastLoc != null && locAge <= FRESH_LOCATION_MAX_AGE_MS
+                val routeStart = primaryRoute.directionsRoute
+                    .legs()?.firstOrNull()?.steps()?.firstOrNull()?.maneuver()?.location()
+                if (isFreshLoc && routeStart != null) {
+                    val snapResults = FloatArray(1)
+                    android.location.Location.distanceBetween(
+                        lastLoc!!.latitude, lastLoc.longitude,
+                        routeStart.latitude(), routeStart.longitude(),
+                        snapResults
+                    )
+                    if (snapResults[0] > ROUTE_ORIGIN_MAX_SNAP_DISTANCE_M) {
+                        Log.d(TAG, "Reroute snap ${snapResults[0].toInt()}m > ${ROUTE_ORIGIN_MAX_SNAP_DISTANCE_M.toInt()}m — forcing API reroute")
+                        val dest = primaryRoute.directionsRoute
+                            .legs()?.lastOrNull()?.steps()?.lastOrNull()?.maneuver()?.location()
+                        if (dest != null) {
+                            acquireNetwork()
+                            val originPt = Point.fromLngLat(lastLoc.longitude, lastLoc.latitude)
+                            val destPt = Point.fromLngLat(dest.longitude(), dest.latitude())
+                            val opts = buildRouteOptions(originPt, destPt, null)
+                            mapboxNavigation?.requestRoutes(opts, object : NavigationRouterCallback {
+                                override fun onCanceled(ro: RouteOptions, origin: String) { releaseNetwork() }
+                                override fun onFailure(r: List<RouterFailure>, ro: RouteOptions) { releaseNetwork() }
+                                override fun onRoutesReady(routes: List<NavigationRoute>, origin: String) {
+                                    releaseNetwork()
+                                    Log.d(TAG, "Reroute corrigido via API: $origin")
+                                    val valid = routes.filter { !isRouteInForbiddenZone(it.directionsRoute) }
+                                    if (valid.isNotEmpty()) {
+                                        routeSetByUs = true
+                                        mapboxNavigation?.setNavigationRoutes(valid)
+                                    }
+                                }
+                            })
+                            return@RoutesObserver
+                        }
+                    }
+                }
+            }
+
             currentDirectionsRoute = primaryRoute.directionsRoute
             Log.d(TAG, "Rota atualizada. Distância da rota: ${primaryRoute.directionsRoute.distance()}")
             cacheRouteData(primaryRoute)
@@ -783,11 +836,13 @@ class MapboxPlatformView(
     }
 
     private fun cacheRouteData(navigationRoute: NavigationRoute) {
-        // Corridor download only uses mobile data in OFF mode with no tiles downloaded yet.
-        // In every other case (BALANCED, AGGRESSIVE, or OFF+tiles) only WiFi is allowed —
-        // skip early so we never call acquireNetwork() and briefly open OfflineSwitch on
-        // mobile data, which would let the entire Mapbox SDK consume data during that window.
-        val allowMobileData = dataSaverMode == DataSaverMode.OFF && !hasDownloadedRegions
+        // BALANCED/AGGRESSIVE: download only routing tiles (~1-5 MB) — allowed on mobile data
+        // because users are mostly on mobile data and the routing tile download is the only
+        // way to restore offline rerouting after the corridor changes (e.g. after a snap
+        // correction that forced an API reroute from a new position).
+        // OFF mode: also downloads map tiles (~50 MB) — restrict to WiFi to avoid large
+        // mobile data usage. Exception: first bootstrap (no tiles yet) always allowed.
+        val allowMobileData = dataSaverMode != DataSaverMode.OFF || !hasDownloadedRegions
         if (!isWifiConnected && !allowMobileData) return
 
         val geometryStr = navigationRoute.directionsRoute.geometry() ?: return
@@ -831,9 +886,9 @@ class MapboxPlatformView(
             val descriptors = listOfNotNull(mapDescriptor, routingDescriptor)
             if (descriptors.isEmpty()) return@getAllTileRegions
 
-            // We only reach here when WiFi is available (or OFF+noTiles on mobile).
-            // Use NONE because we already guaranteed the correct network is present above.
-            val networkRestriction = if (allowMobileData)
+            // WiFi: unrestricted. Mobile data: disallow roaming (DISALLOW_EXPENSIVE) but
+            // allow regular mobile data — keeps corridor tiles updated without roaming charges.
+            val networkRestriction = if (isWifiConnected)
                 com.mapbox.common.NetworkRestriction.NONE
             else
                 com.mapbox.common.NetworkRestriction.DISALLOW_EXPENSIVE
@@ -967,6 +1022,7 @@ class MapboxPlatformView(
         routeLineApi.setNavigationRoutes(allRoutes) { value ->
             routeLineView.renderRouteDrawData(style, value)
         }
+        routeSetByUs = true
         mapboxNavigation?.setNavigationRoutes(allRoutes)
         currentDirectionsRoute = newPrimaryRoute.directionsRoute
         sendEvent("routeSelected", mapOf(
@@ -1355,6 +1411,7 @@ class MapboxPlatformView(
     private fun onRoutesReadyImpl(routes: List<NavigationRoute>, isDestinationChange: Boolean) {
         val validRoutes = routes.filter { !isRouteInForbiddenZone(it.directionsRoute) }
         if (validRoutes.isNotEmpty()) {
+            routeSetByUs = true
             mapboxNavigation?.setNavigationRoutes(validRoutes)
             if (behaviorPolicy.autoOverviewOnRouteReady) {
                 navigationCamera?.requestNavigationCameraToOverview()
@@ -1691,6 +1748,7 @@ class MapboxPlatformView(
                 isTripSessionActive = true
                 sendEvent("tripSessionStateChanged", mapOf("active" to true))
             }
+            routeSetByUs = true
             mapboxNavigation?.setNavigationRoutes(currentRoutes)
             navigationCamera?.requestNavigationCameraToFollowing()
             sendEvent("navigationStarted", null)
