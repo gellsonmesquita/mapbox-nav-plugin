@@ -191,10 +191,6 @@ class MapboxPlatformView(
     // In this state the network stays ON (at low zoom) so the map is not blank.
     @Volatile private var isInUndownloadedArea = false
     private var lastAreaCheckMs = 0L
-    // Timestamp of the last location update received from the trip session.
-    // Used to distinguish a fresh GPS fix from a stale location replayed by the SDK singleton
-    // when the screen is reopened — stale locations must not override the Flutter-provided origin.
-    @Volatile private var lastLocationUpdateMs = 0L
     private var isTripSessionActive = false
     private var isVoiceInstructionsMuted = false
         set(value) {
@@ -292,7 +288,6 @@ class MapboxPlatformView(
         override fun onNewLocationMatcherResult(locationMatcherResult: LocationMatcherResult) {
             _mapView ?: return
             val enhancedLocation = locationMatcherResult.enhancedLocation
-            lastLocationUpdateMs = System.currentTimeMillis()
             navigationLocationProvider.changePosition(
                 location = enhancedLocation,
                 keyPoints = locationMatcherResult.keyPoints,
@@ -1225,10 +1220,11 @@ class MapboxPlatformView(
             return
         }
 
-        val isFreshLocation = navigationLocationProvider.lastLocation != null &&
-            (System.currentTimeMillis() - lastLocationUpdateMs) <= FRESH_LOCATION_MAX_AGE_MS
+        val lastLoc = navigationLocationProvider.lastLocation
+        val locationAge = System.currentTimeMillis() - (lastLoc?.time ?: 0L)
+        val isFreshLocation = lastLoc != null && locationAge <= FRESH_LOCATION_MAX_AGE_MS
         val originPoint = if (isFreshLocation) {
-            Point.fromLngLat(navigationLocationProvider.lastLocation!!.longitude, navigationLocationProvider.lastLocation!!.latitude)
+            Point.fromLngLat(lastLoc!!.longitude, lastLoc.latitude)
         } else {
             Point.fromLngLat(origin[1], origin[0])
         }
@@ -1241,6 +1237,12 @@ class MapboxPlatformView(
         val skipReason = routeRequestGate.skipReason(routeSignature, performancePolicy)
         if (skipReason != null) {
             sendEvent("routeRequestSkipped", mapOf("reason" to skipReason.name.lowercase()))
+            // Gate blocked the request but navigation was pending — start with the existing
+            // route (same origin/destination, recently calculated, still valid).
+            if (pendingStartNavigation && currentDirectionsRoute != null && routeLineApi.getNavigationRoutes().isNotEmpty()) {
+                pendingStartNavigation = false
+                setRouteAndStartNavigation()
+            }
             return
         }
         routeRequestGate.markInFlight(routeSignature)
@@ -1346,20 +1348,29 @@ class MapboxPlatformView(
             return
         }
 
-        if (currentDirectionsRoute == null || routeLineApi.getNavigationRoutes().isEmpty()) {
-            if (origin == null || destination == null || origin.size != 2 || destination.size != 2) {
+        // Always recalculate when origin and destination are provided so the route starts
+        // from the user's current position, never from a cached route's old origin.
+        if (origin != null && destination != null && origin.size == 2 && destination.size == 2) {
+            if (!isValidCoordinate(origin[0], true) || !isValidCoordinate(origin[1], false) ||
+                !isValidCoordinate(destination[0], true) || !isValidCoordinate(destination[1], false)) {
                 Log.e(TAG, "Origem ou destino inválido: origin=$origin, destination=$destination")
                 sendEvent("error", mapOf("message" to "Origem ou destino inválido. Devem conter exatamente [latitude, longitude]."))
                 return
             }
-            Log.d(TAG, "Rota não existe ou routeLineApi vazio, criando rota antes de iniciar.")
+            Log.d(TAG, "Calculando rota antes de iniciar navegação.")
             pendingStartNavigation = true
             createRoute(origin, destination, waypoints)
             return
         }
 
+        // No origin/destination provided — start with existing route if available.
+        if (currentDirectionsRoute == null || routeLineApi.getNavigationRoutes().isEmpty()) {
+            Log.e(TAG, "Nenhuma rota disponível e sem origem/destino fornecidos.")
+            sendEvent("error", mapOf("message" to "No route available. Provide origin and destination."))
+            return
+        }
         setRouteAndStartNavigation()
-        Log.d(TAG, "Navegação iniciada.")
+        Log.d(TAG, "Navegação iniciada com rota existente.")
     }
 
     private fun setMapboxNetwork(connected: Boolean) {
