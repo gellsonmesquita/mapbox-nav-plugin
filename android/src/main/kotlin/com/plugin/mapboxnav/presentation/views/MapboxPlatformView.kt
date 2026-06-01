@@ -393,10 +393,20 @@ class MapboxPlatformView(
                 sendEvent("maneuverError", mapOf("message" to error.errorMessage))
             },
             { maneuvers ->
-                val maneuverList = maneuvers.map { maneuver ->
+                val legIndex = routeProgress.currentLegProgress?.legIndex ?: 0
+                val stepIndex = routeProgress.currentLegProgress?.currentStepProgress?.stepIndex ?: 0
+                val legSteps = routeProgress.route.legs()?.getOrNull(legIndex)?.steps()
+
+                val maneuverList = maneuvers.mapIndexed { index, maneuver ->
+                    val durationRemaining = if (index == 0) {
+                        routeProgress.currentLegProgress?.currentStepProgress?.durationRemaining ?: 0.0
+                    } else {
+                        legSteps?.getOrNull(stepIndex + index)?.duration() ?: 0.0
+                    }
                     mapOf(
                         "instruction" to maneuver.primary.text,
-                        "distance" to maneuver.stepDistance
+                        "distance" to maneuver.stepDistance.distanceRemaining,
+                        "duration" to durationRemaining
                     )
                 }
                 sendEvent("maneuverUpdate", mapOf("maneuvers" to maneuverList))
@@ -964,8 +974,16 @@ class MapboxPlatformView(
                 val hasRegions = expected.isValue && expected.value?.isNotEmpty() == true
                 hasDownloadedRegions = hasRegions
                 if (hasRegions) {
-                    setMapboxNetwork(false)
-                    Log.d(TAG, "Regioes encontradas — rede desligada")
+                    // Only disable the network if no operation has it open (refCount == 0).
+                    // A concurrent route request may have already called acquireNetwork(); calling
+                    // setMapboxNetwork(false) directly here would bypass the ref-count and kill
+                    // the network mid-request, causing the API fallback to also fail.
+                    if (networkRefCount.get() == 0) {
+                        setMapboxNetwork(false)
+                        Log.d(TAG, "Regioes encontradas — rede desligada")
+                    } else {
+                        Log.d(TAG, "Regioes encontradas — rede mantida (operacao em curso refs=${networkRefCount.get()})")
+                    }
                 } else {
                     Log.d(TAG, "Sem regioes baixadas — rede mantida activa")
                 }
