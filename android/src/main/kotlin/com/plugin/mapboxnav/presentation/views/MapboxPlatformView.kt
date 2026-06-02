@@ -174,6 +174,13 @@ class MapboxPlatformView(
     // True when WE called setNavigationRoutes — distinguishes our route sets from SDK reroutes
     // so that the snap-distance validation in routesObserver only fires on automatic reroutes.
     private var routeSetByUs = false
+    // Incident IDs already sent as upcomingIncident during the current navigation session.
+    // Reset on each new route so the same incident is notified again on reroute.
+    private val notifiedIncidentIds = mutableSetOf<String>()
+    // OFF mode only: download map tiles (visual) for the route corridor in addition to routing
+    // tiles. Disabled by default — map tiles add ~20-50 MB per route and are WiFi-only.
+    // Routing tiles (~1-5 MB) are always cached regardless of this flag.
+    private var cacheCorridorMapTiles: Boolean = false
     // Reference counter: network stays ON while any download is in progress.
     // Prevents race conditions when route calculation and cacheRouteData overlap.
     private val networkRefCount = java.util.concurrent.atomic.AtomicInteger(0)
@@ -301,6 +308,26 @@ class MapboxPlatformView(
 
             currentDirectionsRoute = primaryRoute.directionsRoute
             Log.d(TAG, "Rota atualizada. Distância da rota: ${primaryRoute.directionsRoute.distance()}")
+
+            if (dataSaverMode == DataSaverMode.OFF) {
+                notifiedIncidentIds.clear()
+                val allIncidents = mutableListOf<Map<String, Any?>>()
+                primaryRoute.directionsRoute.legs()?.forEach { leg ->
+                    leg.incidents()?.forEach { incident ->
+                        allIncidents.add(mapOf(
+                            "id" to incident.id(),
+                            "type" to (incident.type() ?: "unknown"),
+                            "description" to incident.description(),
+                            "startTime" to incident.startTime(),
+                            "endTime" to incident.endTime()
+                        ))
+                    }
+                }
+                if (allIncidents.isNotEmpty()) {
+                    sendEvent("routeIncidents", mapOf("incidents" to allIncidents))
+                }
+            }
+
             cacheRouteData(primaryRoute)
             routeLineApi.setNavigationRoutes(routeUpdateResult.navigationRoutes) { value ->
                 _mapView?.mapboxMap?.style?.apply { routeLineView.renderRouteDrawData(this, value) }
@@ -421,6 +448,25 @@ class MapboxPlatformView(
                 "percentRouteTraveled" to tripProgress.percentRouteTraveled,
                 "estimatedTimeToArrival" to tripProgress.estimatedTimeToArrival
             ))
+        }
+
+        if (dataSaverMode == DataSaverMode.OFF) {
+            val currentLegIdx = routeProgress.currentLegProgress?.legIndex ?: 0
+            routeProgress.route.legs()?.forEachIndexed { legIdx, leg ->
+                if (legIdx < currentLegIdx) return@forEachIndexed
+                leg.incidents()?.forEach { incident ->
+                    val id = incident.id() ?: return@forEach
+                    if (id in notifiedIncidentIds) return@forEach
+                    notifiedIncidentIds.add(id)
+                    sendEvent("upcomingIncident", mapOf(
+                        "id" to id,
+                        "type" to (incident.type() ?: "unknown"),
+                        "description" to incident.description(),
+                        "startTime" to incident.startTime(),
+                        "endTime" to incident.endTime()
+                    ))
+                }
+            }
         }
     }
 
@@ -716,6 +762,7 @@ class MapboxPlatformView(
 
         locationUpdateIntervalMs =
             (params["locationUpdateIntervalMs"] as? Number)?.toLong() ?: locationUpdateIntervalMs
+        cacheCorridorMapTiles = params["cacheCorridorMapTiles"] as? Boolean ?: cacheCorridorMapTiles
     }
 
     private fun applyRouteOptions(args: Map<*, *>?) {
@@ -748,6 +795,7 @@ class MapboxPlatformView(
         allowAlternatives = args["allowAlternatives"] as? Boolean ?: allowAlternatives
         enableRouteRefresh = args["enableRouteRefresh"] as? Boolean ?: enableRouteRefresh
         routeGeometryPrecision = args["geometryPrecision"] as? String ?: routeGeometryPrecision
+        cacheCorridorMapTiles = args["cacheCorridorMapTiles"] as? Boolean ?: cacheCorridorMapTiles
         locationUpdateIntervalMs =
             (args["locationUpdateIntervalMs"] as? Number)?.toLong() ?: locationUpdateIntervalMs
 
@@ -846,14 +894,10 @@ class MapboxPlatformView(
     }
 
     private fun cacheRouteData(navigationRoute: NavigationRoute) {
-        // BALANCED/AGGRESSIVE: download only routing tiles (~1-5 MB) — allowed on mobile data
-        // because users are mostly on mobile data and the routing tile download is the only
-        // way to restore offline rerouting after the corridor changes (e.g. after a snap
-        // correction that forced an API reroute from a new position).
-        // OFF mode: also downloads map tiles (~50 MB) — restrict to WiFi to avoid large
-        // mobile data usage. Exception: first bootstrap (no tiles yet) always allowed.
-        val allowMobileData = dataSaverMode != DataSaverMode.OFF || !hasDownloadedRegions
-        if (!isWifiConnected && !allowMobileData) return
+        // Map tile corridor download is large (~20-50 MB) — only when cacheCorridorMapTiles=true
+        // AND on WiFi. Routing tiles (~1-5 MB) are always allowed on mobile data.
+        val includeMapTiles = dataSaverMode == DataSaverMode.OFF && cacheCorridorMapTiles
+        if (includeMapTiles && !isWifiConnected) return
 
         val geometryStr = navigationRoute.directionsRoute.geometry() ?: return
         // Use destination coordinates (rounded to ~10 m) as cache key so that reroutes to the
@@ -876,12 +920,9 @@ class MapboxPlatformView(
 
             val routeGeometry = LineString.fromPolyline(geometryStr, 6)
 
-            // In BALANCED/AGGRESSIVE: download only routing tiles (1–5 MB) — used for offline
-            // rerouting along the corridor. Map tiles (10–50 MB) are skipped because:
-            //   • Within a downloaded region: already present, deduplication = 0 MB.
-            //   • Outside a downloaded region: map renders blank but navigation still works.
-            // In OFF mode: also include map tiles for full visual fidelity.
-            val mapDescriptor = if (dataSaverMode == DataSaverMode.OFF) {
+            // Map tiles (20-50 MB): only when explicitly opted in via cacheCorridorMapTiles=true.
+            // Routing tiles (1-5 MB): always included for offline rerouting along the corridor.
+            val mapDescriptor = if (includeMapTiles) {
                 offlineManager.createTilesetDescriptor(
                     TilesetDescriptorOptions.Builder()
                         .styleURI(NavigationStyles.NAVIGATION_DAY_STYLE)
@@ -896,8 +937,8 @@ class MapboxPlatformView(
             val descriptors = listOfNotNull(mapDescriptor, routingDescriptor)
             if (descriptors.isEmpty()) return@getAllTileRegions
 
-            // WiFi: unrestricted. Mobile data: disallow roaming (DISALLOW_EXPENSIVE) but
-            // allow regular mobile data — keeps corridor tiles updated without roaming charges.
+            // Always disallow roaming/expensive connections — routing tiles (~5 MB) are fine on
+            // regular mobile data. WiFi has no restriction either way.
             val networkRestriction = if (isWifiConnected)
                 com.mapbox.common.NetworkRestriction.NONE
             else
@@ -1519,7 +1560,7 @@ class MapboxPlatformView(
         val vpOptions = if (::viewportDataSource.isInitialized) viewportDataSource.options else null
         when (dataSaverMode) {
             DataSaverMode.OFF -> {
-                map.setPrefetchZoomDelta(4)
+                map.setPrefetchZoomDelta(0)
                 toggleTraffic(true)
                 vpOptions?.followingFrameOptions?.apply {
                     defaultPitch = 45.0
@@ -1594,6 +1635,7 @@ class MapboxPlatformView(
 
     fun cancelNavigation() {
         pendingStartNavigation = false
+        notifiedIncidentIds.clear()
         if (rerouteNetworkAcquired.getAndSet(false)) releaseNetwork()
         if (isTripSessionActive) {
             mapboxNavigation?.stopTripSession()

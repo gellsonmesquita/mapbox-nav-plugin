@@ -80,3 +80,49 @@ class ForbiddenZone {
 
   List<Map<String, double>> toList() => coordinates;
 }
+
+enum RouteIncidentType {
+  roadClosure('road_closure'),
+  construction('construction'),
+  accident('incident'),
+  hazard('road_hazard'),
+  laneRestriction('lane_restriction'),
+  weather('weather'),
+  other('unknown');
+
+  final String nativeValue;
+  const RouteIncidentType(this.nativeValue);
+
+  static RouteIncidentType fromNative(String? value) {
+    return RouteIncidentType.values.firstWhere(
+      (e) => e.nativeValue == value,
+      orElse: () => RouteIncidentType.other,
+    );
+  }
+}
+
+class RouteIncident {
+  final String? id;
+  final RouteIncidentType type;
+  final String? description;
+  final String? startTime;
+  final String? endTime;
+
+  const RouteIncident({
+    this.id,
+    required this.type,
+    this.description,
+    this.startTime,
+    this.endTime,
+  });
+
+  factory RouteIncident.fromMap(Map<String, dynamic> map) {
+    return RouteIncident(
+      id: map['id'] as String?,
+      type: RouteIncidentType.fromNative(map['type'] as String?),
+      description: map['description'] as String?,
+      startTime: map['startTime'] as String?,
+      endTime: map['endTime'] as String?,
+    );
+  }
+}

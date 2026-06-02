@@ -19,6 +19,22 @@ class MapboxNavigationController extends ChangeNotifier {
 
   Stream<MapboxNavigationEvent> get events => _eventStreamController.stream;
 
+  /// Emitido uma vez ao calcular a rota (modo OFF). Lista todos os incidents na rota.
+  Stream<List<RouteIncident>> get onRouteIncidents => events
+      .where((e) => e['type'] == 'routeIncidents')
+      .map((e) {
+        final raw = e['incidents'] as List<dynamic>? ?? [];
+        return raw
+            .map((i) => RouteIncident.fromMap(Map<String, dynamic>.from(i as Map)))
+            .toList();
+      });
+
+  /// Emitido durante a navegação (modo OFF) quando um incident ainda não notificado
+  /// é detetado à frente na rota. Cada incident é emitido apenas uma vez por rota.
+  Stream<RouteIncident> get onUpcomingIncident => events
+      .where((e) => e['type'] == 'upcomingIncident')
+      .map((e) => RouteIncident.fromMap(Map<String, dynamic>.from(e)));
+
   MapboxNavigationController(this._viewId) {
     _methodChannel = const MethodChannel('nav_channel');
     _eventChannel = EventChannel('nav_event/$_viewId');
@@ -170,6 +186,9 @@ class MapboxNavigationController extends ChangeNotifier {
     RouteGeometryPrecision? geometryPrecision,
     int? locationUpdateIntervalMs,
     PerformancePolicy? performancePolicy,
+    /// Modo OFF apenas: faz download de map tiles visuais para o corredor da rota (~20-50 MB).
+    /// Restrito a Wi-Fi. Por defeito false — só routing tiles são descarregados.
+    bool? cacheCorridorMapTiles,
   }) async {
     final payload = <String, dynamic>{
       'viewId': _viewId,
@@ -190,6 +209,9 @@ class MapboxNavigationController extends ChangeNotifier {
     }
     if (performancePolicy != null) {
       payload['performancePolicy'] = performancePolicy.toMap();
+    }
+    if (cacheCorridorMapTiles != null) {
+      payload['cacheCorridorMapTiles'] = cacheCorridorMapTiles;
     }
 
     await _methodChannel.invokeMethod('setDataUsageConfig', payload);
