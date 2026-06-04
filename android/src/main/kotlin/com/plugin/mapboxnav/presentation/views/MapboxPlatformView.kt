@@ -257,7 +257,6 @@ class MapboxPlatformView(
         // Capture and reset the flag before any early-return so it is always cleared.
         val wasSetByUs = routeSetByUs
         routeSetByUs = false
-
         if (routeUpdateResult.navigationRoutes.isNotEmpty()) {
             val primaryRoute = routeUpdateResult.navigationRoutes.first()
 
@@ -279,28 +278,36 @@ class MapboxPlatformView(
                         snapResults
                     )
                     if (snapResults[0] > ROUTE_ORIGIN_MAX_SNAP_DISTANCE_M) {
-                        Log.d(TAG, "Reroute snap ${snapResults[0].toInt()}m > ${ROUTE_ORIGIN_MAX_SNAP_DISTANCE_M.toInt()}m — forcing API reroute")
-                        val dest = primaryRoute.directionsRoute
-                            .legs()?.lastOrNull()?.steps()?.lastOrNull()?.maneuver()?.location()
-                        if (dest != null) {
-                            acquireNetwork()
-                            val originPt = Point.fromLngLat(lastLoc.longitude, lastLoc.latitude)
-                            val destPt = Point.fromLngLat(dest.longitude(), dest.latitude())
-                            val opts = buildRouteOptions(originPt, destPt, null)
-                            mapboxNavigation?.requestRoutes(opts, object : NavigationRouterCallback {
-                                override fun onCanceled(ro: RouteOptions, origin: String) { releaseNetwork() }
-                                override fun onFailure(r: List<RouterFailure>, ro: RouteOptions) { releaseNetwork() }
-                                override fun onRoutesReady(routes: List<NavigationRoute>, origin: String) {
-                                    releaseNetwork()
-                                    Log.d(TAG, "Reroute corrigido via API: $origin")
-                                    val valid = routes.filter { !isRouteInForbiddenZone(it.directionsRoute) }
-                                    if (valid.isNotEmpty()) {
-                                        routeSetByUs = true
-                                        mapboxNavigation?.setNavigationRoutes(valid)
+                        if (dataSaverMode != DataSaverMode.OFF && hasDownloadedRegions) {
+                            // BALANCED/AGGRESSIVE: never queue an API call here.
+                            // If we called acquireNetwork() with no device connectivity, the SDK
+                            // would buffer the HTTP request and fire it when data is re-enabled,
+                            // consuming quota silently. Accept the offline route as-is instead.
+                            Log.d(TAG, "Reroute snap ${snapResults[0].toInt()}m > threshold — aceitando rota offline (modo $dataSaverMode, sem API)")
+                        } else {
+                            Log.d(TAG, "Reroute snap ${snapResults[0].toInt()}m > ${ROUTE_ORIGIN_MAX_SNAP_DISTANCE_M.toInt()}m — forcing API reroute")
+                            val dest = primaryRoute.directionsRoute
+                                .legs()?.lastOrNull()?.steps()?.lastOrNull()?.maneuver()?.location()
+                            if (dest != null) {
+                                acquireNetwork()
+                                val originPt = Point.fromLngLat(lastLoc.longitude, lastLoc.latitude)
+                                val destPt = Point.fromLngLat(dest.longitude(), dest.latitude())
+                                val opts = buildRouteOptions(originPt, destPt, null)
+                                mapboxNavigation?.requestRoutes(opts, object : NavigationRouterCallback {
+                                    override fun onCanceled(ro: RouteOptions, origin: String) { releaseNetwork() }
+                                    override fun onFailure(r: List<RouterFailure>, ro: RouteOptions) { releaseNetwork() }
+                                    override fun onRoutesReady(routes: List<NavigationRoute>, origin: String) {
+                                        releaseNetwork()
+                                        Log.d(TAG, "Reroute corrigido via API: $origin")
+                                        val valid = routes.filter { !isRouteInForbiddenZone(it.directionsRoute) }
+                                        if (valid.isNotEmpty()) {
+                                            routeSetByUs = true
+                                            mapboxNavigation?.setNavigationRoutes(valid)
+                                        }
                                     }
-                                }
-                            })
-                            return@RoutesObserver
+                                })
+                                return@RoutesObserver
+                            }
                         }
                     }
                 }
@@ -1362,6 +1369,12 @@ class MapboxPlatformView(
         }
         routeRequestGate.markInFlight(routeSignature)
 
+        // In BALANCED/AGGRESSIVE mode, recalculations during active navigation must NOT fall
+        // back to the Directions API — only offline routing is allowed. Each API call consumes
+        // one session from the quota; offline routing is free. Destination changes always use
+        // the API because the user explicitly wants a new route to a different place.
+        val noApiFallback = !isDestinationChange && currentDirectionsRoute != null && dataSaverMode != DataSaverMode.OFF
+
         // Always query TileStore at call time for a fresh tile availability check.
         // Prefer offline routing when tiles exist — avoids a Directions API call regardless
         // of dataSaverMode. Falls back to the API transparently when tiles don't cover the area.
@@ -1369,8 +1382,21 @@ class MapboxPlatformView(
             val hasRegions = expected.isValue && expected.value?.isNotEmpty() == true
             hasDownloadedRegions = hasRegions
             android.os.Handler(android.os.Looper.getMainLooper()).post {
+                if (noApiFallback && !hasRegions) {
+                    // No offline tiles available and API is blocked — keep existing route.
+                    Log.d(TAG, "createRoute: modo $dataSaverMode, recálculo sem tiles — mantendo rota existente")
+                    routeRequestGate.clearInFlight()
+                    if (pendingStartNavigation && routeLineApi.getNavigationRoutes().isNotEmpty()) {
+                        pendingStartNavigation = false
+                        setRouteAndStartNavigation()
+                    } else {
+                        pendingStartNavigation = false
+                    }
+                    sendEvent("routeRequestSkipped", mapOf("reason" to "offline_preferred"))
+                    return@post
+                }
                 if (!hasRegions) acquireNetwork()
-                doRequestRoutes(options, isDestinationChange, tryOffline = hasRegions)
+                doRequestRoutes(options, isDestinationChange, tryOffline = hasRegions, noApiFallback = noApiFallback)
             }
         }
     }
@@ -1379,6 +1405,7 @@ class MapboxPlatformView(
         options: RouteOptions,
         isDestinationChange: Boolean,
         tryOffline: Boolean,
+        noApiFallback: Boolean = false,
     ) {
         mapboxNavigation?.requestRoutes(options, object : NavigationRouterCallback {
             override fun onCanceled(routeOptions: RouteOptions, routerOrigin: String) {
@@ -1390,6 +1417,20 @@ class MapboxPlatformView(
 
             override fun onFailure(reasons: List<RouterFailure>, routeOptions: RouteOptions) {
                 if (tryOffline) {
+                    if (noApiFallback) {
+                        // Recalculation during navigation in BALANCED/AGGRESSIVE — no API call allowed.
+                        // Keep the existing route; the SDK rerouter will handle off-route scenarios.
+                        Log.d(TAG, "Routing offline falhou, noApiFallback=true — mantendo rota existente")
+                        routeRequestGate.clearInFlight()
+                        if (pendingStartNavigation && routeLineApi.getNavigationRoutes().isNotEmpty()) {
+                            pendingStartNavigation = false
+                            setRouteAndStartNavigation()
+                        } else {
+                            pendingStartNavigation = false
+                        }
+                        sendEvent("routeRequestSkipped", mapOf("reason" to "offline_routing_failed"))
+                        return
+                    }
                     // Local tiles don't cover this route — retry transparently via Directions API.
                     Log.d(TAG, "Routing offline falhou (${reasons.joinToString { it.message }}), a tentar via API")
                     acquireNetwork()
@@ -1437,6 +1478,20 @@ class MapboxPlatformView(
                             snapResults
                         )
                         if (snapResults[0] > ROUTE_ORIGIN_MAX_SNAP_DISTANCE_M) {
+                            if (noApiFallback) {
+                                // User is outside the cached corridor but API is blocked.
+                                // Keep existing route — SDK rerouter handles off-route naturally.
+                                Log.d(TAG, "Offline snap ${snapResults[0].toInt()}m > threshold, noApiFallback=true — mantendo rota existente")
+                                routeRequestGate.clearInFlight()
+                                if (pendingStartNavigation && routeLineApi.getNavigationRoutes().isNotEmpty()) {
+                                    pendingStartNavigation = false
+                                    setRouteAndStartNavigation()
+                                } else {
+                                    pendingStartNavigation = false
+                                }
+                                sendEvent("routeRequestSkipped", mapOf("reason" to "offline_snap_exceeded"))
+                                return
+                            }
                             Log.d(TAG, "Offline snap ${snapResults[0].toInt()}m > ${ROUTE_ORIGIN_MAX_SNAP_DISTANCE_M.toInt()}m — retrying via API")
                             acquireNetwork()
                             mapboxNavigation?.requestRoutes(options, object : NavigationRouterCallback {
